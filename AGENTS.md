@@ -201,6 +201,7 @@ Runbooks — Handy Commands
 - One-shot cleanup: `python3 run_cleanup.py you@example.com --batch-size 50`
 
 Updates
+- 2025-10-18: CI deploy via script. GitHub Actions now runs `verify_e2e.py` on every push to `main` using a service account key from repo secret `GCP_SA_KEY`. The previous workflow steps that directly invoked `gcloud builds submit` and `gcloud run deploy` were removed. The script performs build, deploy, Pub/Sub wiring, health checks, and scheduler setup. If you previously configured Cloud Build Triggers or Cloud Run continuous deployment, disable them to avoid duplicate build emails.
 - 2025-10-18: Agent workflow — enforce commit/push/verify after every change. Added explicit steps and command line to AGENTS.md.
 - 2025-10-18: Frontend error handling improved. The web console now normalizes FastAPI error payloads (including 422 validation arrays and nested objects) into readable messages, so users will no longer see "[object Object]" after pressing "Process next batch". No backend contract changes required.
 - 2025-10-18: Batch cleanup safety + UX. The `/api/cleanup/run` endpoint now processes exactly one batch (one Gmail page) and suppresses Telegram notifications by default. This prevents long-running cleanups from the UI and avoids Telegram spam. The processor also fails fast if a batch is 100% errors (stops further batches), reducing API credit burn when misconfigured.
