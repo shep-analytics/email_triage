@@ -1,0 +1,17 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Local secrets (never commit)
+.env
+keys.py
+.gmail_tokens/
+client_secret*.json
+email-assistant-service-key.json
+
+# IDE
+.idea/
+.vscode/
+

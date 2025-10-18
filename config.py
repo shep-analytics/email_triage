@@ -36,14 +36,14 @@ CLASSIFICATION_PROMPT_PATH = "classification_prompt.txt"
 # Supabase configuration ----------------------------------------------------
 
 # Set these once your Supabase project is ready.
-SUPABASE_URL = "https://wxliwwdftbolaxnpjjaj.supabase.co"
-SUPABASE_SERVICE_ROLE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Ind4bGl3d2RmdGJvbGF4bnBqamFqIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc2MDQ5NzE4MiwiZXhwIjoyMDc2MDczMTgyfQ.ES_jW6reSFNh7kwk3ZyEyKbbQ3M7ThZWMXV7f9XcRjs"
+SUPABASE_URL = None  # Read from env SUPABASE_URL
+SUPABASE_SERVICE_ROLE_KEY = None  # Read from env SUPABASE_SERVICE_ROLE_KEY
 
 # Optional: anon key if you need client-side access later.
-SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Ind4bGl3d2RmdGJvbGF4bnBqamFqIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjA0OTcxODIsImV4cCI6MjA3NjA3MzE4Mn0.kjfy_CM-x4uX38JuN3B_3Hr30j0B_wgULudc0kRkiKs"
+SUPABASE_ANON_KEY = None  # Optional, read from env SUPABASE_ANON_KEY
 
 
 # Telegram configuration ----------------------------------------------------
 # Leave these as None to fall back to keys.py or environment variables.
-TELEGRAM_BOT_TOKEN = None
-TELEGRAM_CHAT_ID = None
+TELEGRAM_BOT_TOKEN = None  # Prefer env TELEGRAM_BOT_TOKEN
+TELEGRAM_CHAT_ID = None    # Prefer env TELEGRAM_CHAT_ID
