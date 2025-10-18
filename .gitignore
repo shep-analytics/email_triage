@@ -4,9 +4,8 @@ __pycache__/
 .venv/
 venv/
 
-# Local secrets (never commit)
+# Local secrets (committing is allowed per project policy)
 .env
-keys.py
 .gmail_tokens/
 client_secret*.json
 email-assistant-service-key.json
@@ -14,4 +13,3 @@ email-assistant-service-key.json
 # IDE
 .idea/
 .vscode/
-

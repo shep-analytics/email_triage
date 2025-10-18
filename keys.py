@@ -1,0 +1,8 @@
+OPENROUTER_API_Key = "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"
+telegram_token = "8262961750:AAERB6ucl1wmYqwwOQngJbZ1FzNVdpUHcZc"
+telegram_chat_id = "6419501766"
+SUPABASE_URL = "https://wxliwwdftbolaxnpjjaj.supabase.co"
+SUPABASE_SERVICE_ROLE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Ind4bGl3d2RmdGJvbGF4bnBqamFqIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc2MDQ5NzE4MiwiZXhwIjoyMDc2MDczMTgyfQ.ES_jW6reSFNh7kwk3ZyEyKbbQ3M7ThZWMXV7f9XcRjs"
+GCP_PROJECT_ID = "email-assistant-475201"
+GCP_SERVICE_ACCOUNT_KEY_FILE = "json_keys/owner_google_service_account_key.json"
+GOOGLE_OAUTH_CLIENT_ID = "809556060795-ese8t37i229h6ehmod83knni7fnnrh03.apps.googleusercontent.com"
