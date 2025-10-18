@@ -33,6 +33,12 @@ const newCriterionText = document.getElementById("new-criterion-text");
 const criteriaListEl = document.getElementById("criteria-list");
 const refreshCriteriaBtn = document.getElementById("refresh-criteria");
 const criteriaStatus = document.getElementById("criteria-status");
+// Viewer elements
+const viewerStatus = document.getElementById("viewer-status");
+const viewerList = document.getElementById("viewer-list");
+const loadInboxBtn = document.getElementById("load-inbox");
+const loadRequiresBtn = document.getElementById("load-requires");
+const loadShouldBtn = document.getElementById("load-should");
 
 document.addEventListener("DOMContentLoaded", () => {
   init().catch((error) => {
@@ -105,6 +111,9 @@ function setupEventHandlers() {
   if (criteriaListEl) {
     criteriaListEl.addEventListener("click", handleCriteriaAction);
   }
+  if (loadInboxBtn) loadInboxBtn.addEventListener("click", () => loadViewer("inbox"));
+  if (loadRequiresBtn) loadRequiresBtn.addEventListener("click", () => loadViewer("requires_response"));
+  if (loadShouldBtn) loadShouldBtn.addEventListener("click", () => loadViewer("should_read"));
 }
 
 function initGoogleSignIn() {
@@ -670,4 +679,166 @@ function formatTimestamp(value) {
   } catch (_error) {
     return value;
   }
+}
+
+// -----------------------------
+// Email Viewer
+// -----------------------------
+
+async function loadViewer(label) {
+  if (!state.token) {
+    setStatus(viewerStatus, "Sign in first.", true);
+    return;
+  }
+  try {
+    setStatus(viewerStatus, `Loading ${label.replace("_", " ")}...`, false);
+    viewerList.innerHTML = "";
+    const data = await apiFetch(`/api/messages?label=${encodeURIComponent(label)}&max_results=50`);
+    renderViewer(data.items || []);
+    setStatus(viewerStatus, `Loaded ${data.items?.length || 0} messages.`, false);
+  } catch (error) {
+    setStatus(viewerStatus, error.message, true);
+  }
+}
+
+function renderViewer(items) {
+  viewerList.innerHTML = "";
+  if (!items.length) {
+    const empty = document.createElement("p");
+    empty.textContent = "No messages found.";
+    empty.className = "message-empty";
+    viewerList.appendChild(empty);
+    return;
+  }
+  items.forEach((item) => viewerList.appendChild(buildViewerCard(item)));
+}
+
+function buildViewerCard(item) {
+  const card = document.createElement("div");
+  card.className = "message-card";
+  card.dataset.gmailId = item.gmail_id;
+  card.innerHTML = `
+    <h4>${escapeHtml(item.subject || "(no subject)")}</h4>
+    <p class="message-meta">From: ${escapeHtml(item.from || "")} • ${escapeHtml(item.date || "")}</p>
+    <p class="message-summary">${escapeHtml(item.snippet || "")}</p>
+    <div class="actions-row">
+      <button class="view-btn secondary">View</button>
+      <button class="reply-btn">Reply</button>
+      <button class="archive-btn secondary">Archive</button>
+      <button class="delete-btn danger">Delete</button>
+    </div>
+    <div class="viewer-body hidden"></div>
+    <div class="reply-box hidden">
+      <label>
+        Your reply
+        <textarea class="reply-text" rows="4" placeholder="Type your response..."></textarea>
+      </label>
+      <div class="actions-row">
+        <button class="send-reply">Send</button>
+        <button class="cancel-reply secondary">Cancel</button>
+      </div>
+      <div class="reply-status status"></div>
+    </div>
+  `;
+  const viewBtn = card.querySelector(".view-btn");
+  const replyBtn = card.querySelector(".reply-btn");
+  const archiveBtn = card.querySelector(".archive-btn");
+  const deleteBtn = card.querySelector(".delete-btn");
+  const bodyEl = card.querySelector(".viewer-body");
+  const replyBox = card.querySelector(".reply-box");
+  const sendReplyBtn = card.querySelector(".send-reply");
+  const cancelReplyBtn = card.querySelector(".cancel-reply");
+  const replyText = card.querySelector(".reply-text");
+  const replyStatus = card.querySelector(".reply-status");
+
+  let loaded = false;
+  viewBtn.addEventListener("click", async () => {
+    try {
+      if (!loaded) {
+        bodyEl.innerHTML = "Loading...";
+        bodyEl.classList.remove("hidden");
+        const data = await apiFetch(`/api/messages/${encodeURIComponent(card.dataset.gmailId)}`);
+        const content = document.createElement("div");
+        content.className = "viewer-content";
+        const text = document.createElement("pre");
+        text.textContent = data.body_text || "(no text body)";
+        content.appendChild(text);
+        bodyEl.innerHTML = "";
+        bodyEl.appendChild(content);
+        loaded = true;
+      } else {
+        bodyEl.classList.toggle("hidden");
+      }
+    } catch (error) {
+      bodyEl.textContent = error.message;
+      bodyEl.classList.remove("hidden");
+    }
+  });
+
+  replyBtn.addEventListener("click", () => {
+    replyBox.classList.remove("hidden");
+    replyText.focus();
+  });
+  cancelReplyBtn.addEventListener("click", () => {
+    replyBox.classList.add("hidden");
+    replyStatus.textContent = "";
+    replyStatus.classList.remove("error", "success");
+    replyText.value = "";
+  });
+  sendReplyBtn.addEventListener("click", async () => {
+    const text = replyText.value.trim();
+    if (!text) {
+      setStatus(replyStatus, "Please type a reply.", true);
+      return;
+    }
+    try {
+      sendReplyBtn.disabled = true;
+      setStatus(replyStatus, "Sending reply...", false);
+      await apiFetch(`/api/messages/${encodeURIComponent(card.dataset.gmailId)}/reply`, {
+        method: "POST",
+        body: JSON.stringify({ body_text: text }),
+      });
+      setStatus(replyStatus, "Reply sent.", false);
+      setTimeout(() => {
+        replyBox.classList.add("hidden");
+        sendReplyBtn.disabled = false;
+        replyStatus.textContent = "";
+        replyText.value = "";
+      }, 1200);
+    } catch (error) {
+      sendReplyBtn.disabled = false;
+      setStatus(replyStatus, error.message, true);
+    }
+  });
+
+  archiveBtn.addEventListener("click", async () => {
+    if (!window.confirm("Archive this message?")) return;
+    try {
+      archiveBtn.disabled = true;
+      await apiFetch(`/api/messages/${encodeURIComponent(card.dataset.gmailId)}/archive`, {
+        method: "POST",
+        body: JSON.stringify({}),
+      });
+      card.remove();
+    } catch (error) {
+      archiveBtn.disabled = false;
+      alert(error.message);
+    }
+  });
+  deleteBtn.addEventListener("click", async () => {
+    if (!window.confirm("Delete this message? This cannot be undone.")) return;
+    try {
+      deleteBtn.disabled = true;
+      await apiFetch(`/api/messages/${encodeURIComponent(card.dataset.gmailId)}/delete`, {
+        method: "POST",
+        body: JSON.stringify({}),
+      });
+      card.remove();
+    } catch (error) {
+      deleteBtn.disabled = false;
+      alert(error.message);
+    }
+  });
+
+  return card;
 }

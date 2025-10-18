@@ -26,6 +26,8 @@ GMAIL_SCOPES = [
     "https://www.googleapis.com/auth/gmail.readonly",
     # Be explicit about metadata access to avoid any provider quirks
     "https://www.googleapis.com/auth/gmail.metadata",
+    # Enable sending replies from the web UI
+    "https://www.googleapis.com/auth/gmail.send",
 ]
 
 

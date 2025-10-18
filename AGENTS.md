@@ -13,6 +13,7 @@ Architecture
 - Notifications `telegram_notify.py`: Thin Telegram Bot API wrapper with optional interactive callback support.
 - LLM client `query_LLM.py`: Single-turn request to OpenRouter. Expects strict JSON from models. Requires OpenRouter API key. Default model: `openai/gpt-5` (override via `OPENROUTER_MODEL`).
 - Web UI `static/`: Login (GIS), run batch cleanup, view summaries, and submit feedback that creates criteria.
+- Web UI `static/`: Login (GIS), run batch cleanup, view summaries, browse messages (Inbox, Requires Response, Should Read), view full email text, reply, archive, and delete.
 
 Configuration
 - Preferred configuration lives in `config.py`. Environment variables of the same names always override. Optional `keys.py` can provide `telegram_token`, `telegram_chat_id`, and `OPENROUTER_API_Key`. It also supports `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` (the app will read these if not set in env/config), plus optional `GOOGLE_OAUTH_CLIENT_ID` and deploy helpers like `GCP_PROJECT_ID` and `GCP_SERVICE_ACCOUNT_KEY_FILE`.
@@ -32,6 +33,7 @@ Configuration
   - `GMAIL_EXTRA_SCOPES`: Comma-separated list appended to default scopes.
   - `DISABLE_TELEGRAM=1`: Global kill-switch to disable all Telegram sends.
   - `OPENROUTER_MODEL`: Override the default LLM model (default is `openai/gpt-5`).
+  - Note: UI reply requires Gmail scope `gmail.send`. Tokens minted before this change may need re‑consent; set `GMAIL_AUTO_REAUTH=1` and temporarily `GMAIL_ALLOW_OAUTH_FLOW=1` to refresh locally.
 
 **Hands-Off Deployment (Zero-Input)**
 - Goal: allow the agent to build/deploy, wire Pub/Sub + Gmail watches, persist to Supabase, and run digests without human steps.
@@ -87,6 +89,11 @@ Endpoints (FastAPI)
 - `GET /health` or `GET /healthz` — Health information (mailbox watch/checkpoint state, telegram, and store mode).
 - `POST /alerts/digest` — Sends grouped Telegram digests for queued “alert_today” items.
 - `POST /cron/refresh`, `POST /cron/digest` — Unauthenticated cron-friendly aliases.
+- `GET /api/messages?label=<inbox|requires_response|should_read|all>&max_results=<n>&page_token=<t>` — List recent messages for the logged-in mailbox.
+- `GET /api/messages/{gmail_id}` — Fetch full message headers + text/html bodies.
+- `POST /api/messages/{gmail_id}/reply` — Send a reply in the same thread. Body: `{ body_text, to?, subject?, mailbox_email? }`.
+- `POST /api/messages/{gmail_id}/archive` — Remove `INBOX` label (archives). Body: `{ mailbox_email? }`.
+- `POST /api/messages/{gmail_id}/delete` — Delete the message. Body: `{ mailbox_email? }`.
 
 Data Model (Supabase tables)
 - `mailboxes(email, history_id, watch_expiration)` — One row per mailbox.
@@ -206,6 +213,7 @@ Updates
   - UI cleanup still processes exactly one batch per run and suppresses Telegram.
   - Inlined SVG favicon to eliminate `/favicon.ico` 404.
 - 2025-10-18: E2E verify/deploy. Ran `verify_e2e.py` which rebuilt/deployed to Cloud Run, ensured Pub/Sub topic + push subscription, refreshed Gmail watches, and installed Cloud Scheduler jobs. Current resolved service URL: `https://email-triage-rq4d232cbq-uc.a.run.app` (the previous regional URL also routes). Push subscription `email-triage-push` now targets `<RUN_URL>/gmail/push`.
+- 2025-10-18: Email viewer + replies. Added UI to browse Inbox/Requires Response/Should Read, view full message text, reply inline, and archive/delete. New API endpoints under `/api/messages/*`. Gmail scope `gmail.send` added; tokens may need reauth if previously minted without it.
 
 Behavioral Notes
 - UI batch runs: one batch only, no Telegram. Call again to process the next batch.

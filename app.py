@@ -5,7 +5,9 @@ from pathlib import Path
 import asyncio
 import uuid
 import json
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
+import base64
+import email.utils as email_utils
 
 from fastapi import Depends, FastAPI, HTTPException, Request, Body
 from fastapi.responses import FileResponse, StreamingResponse
@@ -219,6 +221,67 @@ def get_current_user(credentials: Optional[HTTPAuthorizationCredentials] = Depen
     return _authenticate(credentials)
 
 
+# -----------------------------
+# Helpers for message parsing/sending
+# -----------------------------
+
+def _extract_headers_from_metadata(metadata: Dict[str, Any]) -> Dict[str, str]:
+    headers: Dict[str, str] = {}
+    try:
+        for header in metadata.get("payload", {}).get("headers", []):
+            name = header.get("name")
+            value = header.get("value")
+            if name and value:
+                headers[name.lower()] = value
+    except Exception:
+        pass
+    return headers
+
+
+def _decode_b64url(data: str) -> bytes:
+    s = data.strip()
+    # Pad base64 string if necessary
+    padding = 4 - (len(s) % 4)
+    if padding and padding < 4:
+        s += "=" * padding
+    return base64.urlsafe_b64decode(s.encode("utf-8"))
+
+
+def _extract_bodies(payload: Dict[str, Any]) -> Tuple[str, str]:
+    text_parts: List[str] = []
+    html_parts: List[str] = []
+
+    def visit(part: Dict[str, Any]) -> None:
+        mime_type = part.get("mimeType", "")
+        body = part.get("body", {})
+        data = body.get("data")
+        if data and isinstance(data, str):
+            try:
+                decoded = _decode_b64url(data).decode("utf-8", errors="replace")
+            except Exception:
+                decoded = ""
+        else:
+            decoded = ""
+        if mime_type.startswith("text/plain") and decoded:
+            text_parts.append(decoded)
+        elif mime_type.startswith("text/html") and decoded:
+            html_parts.append(decoded)
+        for child in part.get("parts", []) or []:
+            visit(child)
+
+    if payload:
+        # Top-level may contain data directly
+        visit(payload)
+        if not text_parts and not html_parts:
+            data = payload.get("body", {}).get("data")
+            if data:
+                try:
+                    text_parts.append(_decode_b64url(data).decode("utf-8", errors="replace"))
+                except Exception:
+                    pass
+    return ("\n".join(text_parts).strip(), "\n".join(html_parts).strip())
+
+
 # ---------------------------------------------------------------------------
 # Request/response models (Pydantic)
 # Define these before route declarations so FastAPI correctly treats them
@@ -261,6 +324,21 @@ class CriterionPayload(BaseModel):
 class CriterionUpdatePayload(BaseModel):
     text: Optional[str] = Field(default=None, min_length=1, max_length=500)
     enabled: Optional[bool] = None
+
+
+# -----------------------------
+# Message viewer + actions models
+# -----------------------------
+
+class ReplyPayload(BaseModel):
+    mailbox_email: Optional[str] = None
+    body_text: str = Field(min_length=1)
+    to: Optional[str] = None  # overrides default reply target
+    subject: Optional[str] = None  # overrides auto Re: subject
+
+
+class MailboxPayload(BaseModel):
+    mailbox_email: Optional[str] = None
 
 
 @app.get("/")
@@ -499,6 +577,202 @@ async def update_criterion(criterion_id: str, payload: CriterionUpdatePayload = 
 async def delete_criterion(criterion_id: str, user=Depends(get_current_user)):
     prompt_manager.delete_criterion(criterion_id)
     return {"status": "deleted"}
+
+
+# -----------------------------
+# Message viewer + actions
+# -----------------------------
+
+@app.get("/api/messages")
+async def list_messages(
+    label: str = "inbox",
+    max_results: int = 50,
+    page_token: Optional[str] = None,
+    mailbox_email: Optional[str] = None,
+    user=Depends(get_current_user),
+):
+    mailbox = (mailbox_email or user["email"]).strip()
+    if not mailbox:
+        raise HTTPException(status_code=400, detail="mailbox_email is required.")
+    if max_results <= 0 or max_results > 500:
+        raise HTTPException(status_code=400, detail="max_results must be between 1 and 500.")
+
+    service = gmail_service_factory(mailbox)
+    kwargs: Dict[str, Any] = {
+        "userId": mailbox,
+        "maxResults": max_results,
+    }
+    q = None
+    if label == "inbox":
+        kwargs["labelIds"] = ["INBOX"]
+    elif label == "requires_response":
+        q = 'label:"Requiring Response"'
+    elif label == "should_read":
+        q = 'label:"User Should Read"'
+    elif label == "all":
+        # no filters
+        pass
+    else:
+        raise HTTPException(status_code=400, detail="Unsupported label filter.")
+    if q:
+        kwargs["q"] = q
+    if page_token:
+        kwargs["pageToken"] = page_token
+
+    response = service.users().messages().list(**kwargs).execute()
+    items: List[Dict[str, Any]] = []
+    for msg in response.get("messages", []) or []:
+        mid = msg.get("id")
+        if not mid:
+            continue
+        try:
+            metadata = (
+                service.users()
+                .messages()
+                .get(
+                    userId=mailbox,
+                    id=mid,
+                    format="metadata",
+                    metadataHeaders=["From", "To", "Subject", "Date"],
+                )
+                .execute()
+            )
+        except Exception:
+            # Fallback to minimal fields if metadata fetch fails
+            metadata = {"id": mid, "snippet": ""}
+        headers = _extract_headers_from_metadata(metadata)
+        items.append(
+            {
+                "gmail_id": metadata.get("id", mid),
+                "thread_id": metadata.get("threadId", ""),
+                "subject": headers.get("subject", ""),
+                "from": headers.get("from", ""),
+                "to": headers.get("to", ""),
+                "date": headers.get("date", ""),
+                "snippet": metadata.get("snippet", ""),
+            }
+        )
+    return {
+        "items": items,
+        "next_page_token": response.get("nextPageToken"),
+        "result_size_estimate": response.get("resultSizeEstimate"),
+    }
+
+
+@app.get("/api/messages/{gmail_id}")
+async def get_message(gmail_id: str, mailbox_email: Optional[str] = None, user=Depends(get_current_user)):
+    mailbox = (mailbox_email or user["email"]).strip()
+    if not mailbox:
+        raise HTTPException(status_code=400, detail="mailbox_email is required.")
+    service = gmail_service_factory(mailbox)
+    try:
+        message = (
+            service.users()
+            .messages()
+            .get(userId=mailbox, id=gmail_id, format="full")
+            .execute()
+        )
+    except Exception as exc:  # pragma: no cover - external
+        raise HTTPException(status_code=500, detail=str(exc))
+    headers = _extract_headers_from_metadata(message)
+    text_body, html_body = _extract_bodies(message.get("payload", {}))
+    return {
+        "gmail_id": message.get("id", gmail_id),
+        "thread_id": message.get("threadId", ""),
+        "headers": headers,
+        "snippet": message.get("snippet", ""),
+        "body_text": text_body,
+        "body_html": html_body,
+    }
+
+
+@app.post("/api/messages/{gmail_id}/reply")
+async def reply_message(gmail_id: str, payload: ReplyPayload = Body(...), user=Depends(get_current_user)):
+    mailbox = (payload.mailbox_email or user["email"]).strip()
+    if not mailbox:
+        raise HTTPException(status_code=400, detail="mailbox_email is required.")
+    body_text = payload.body_text.strip()
+    if not body_text:
+        raise HTTPException(status_code=400, detail="body_text is required.")
+
+    service = gmail_service_factory(mailbox)
+    try:
+        original = (
+            service.users()
+            .messages()
+            .get(userId=mailbox, id=gmail_id, format="full")
+            .execute()
+        )
+    except Exception as exc:  # pragma: no cover
+        raise HTTPException(status_code=500, detail=str(exc))
+    headers = _extract_headers_from_metadata(original)
+    thread_id = original.get("threadId")
+    orig_subject = headers.get("subject", "")
+    orig_msg_id = headers.get("message-id", "")
+    references = headers.get("references", "").strip()
+
+    to_addr = (payload.to or headers.get("reply-to") or headers.get("from") or "").strip()
+    if not to_addr:
+        raise HTTPException(status_code=400, detail="Could not determine reply target.")
+    subject = (payload.subject or (orig_subject if orig_subject.lower().startswith("re:") else f"Re: {orig_subject}")).strip()
+
+    lines = [
+        f"From: {mailbox}",
+        f"To: {to_addr}",
+        f"Subject: {subject}",
+        f"Date: {email_utils.formatdate(localtime=True)}",
+    ]
+    if orig_msg_id:
+        lines.append(f"In-Reply-To: {orig_msg_id}")
+        ref_value = f"{references} {orig_msg_id}".strip() if references else orig_msg_id
+        lines.append(f"References: {ref_value}")
+    lines += [
+        "MIME-Version: 1.0",
+        'Content-Type: text/plain; charset="UTF-8"',
+        "Content-Transfer-Encoding: 7bit",
+        "",
+        body_text,
+    ]
+    raw_bytes = "\r\n".join(lines).encode("utf-8")
+    raw_b64 = base64.urlsafe_b64encode(raw_bytes).decode("utf-8").rstrip("=")
+    body: Dict[str, Any] = {"raw": raw_b64}
+    if thread_id:
+        body["threadId"] = thread_id
+    try:
+        sent = service.users().messages().send(userId=mailbox, body=body).execute()
+    except Exception as exc:  # pragma: no cover
+        raise HTTPException(status_code=500, detail=str(exc))
+    return {"status": "sent", "id": sent.get("id"), "thread_id": sent.get("threadId")}
+
+
+@app.post("/api/messages/{gmail_id}/archive")
+async def archive_message(gmail_id: str, payload: MailboxPayload = Body(...), user=Depends(get_current_user)):
+    mailbox = (payload.mailbox_email or user["email"]).strip()
+    if not mailbox:
+        raise HTTPException(status_code=400, detail="mailbox_email is required.")
+    service = gmail_service_factory(mailbox)
+    try:
+        service.users().messages().modify(
+            userId=mailbox,
+            id=gmail_id,
+            body={"removeLabelIds": ["INBOX"], "addLabelIds": []},
+        ).execute()
+    except Exception as exc:  # pragma: no cover
+        raise HTTPException(status_code=500, detail=str(exc))
+    return {"status": "archived", "gmail_id": gmail_id}
+
+
+@app.post("/api/messages/{gmail_id}/delete")
+async def delete_message(gmail_id: str, payload: MailboxPayload = Body(...), user=Depends(get_current_user)):
+    mailbox = (payload.mailbox_email or user["email"]).strip()
+    if not mailbox:
+        raise HTTPException(status_code=400, detail="mailbox_email is required.")
+    service = gmail_service_factory(mailbox)
+    try:
+        service.users().messages().delete(userId=mailbox, id=gmail_id).execute()
+    except Exception as exc:  # pragma: no cover
+        raise HTTPException(status_code=500, detail=str(exc))
+    return {"status": "deleted", "gmail_id": gmail_id}
 
 
 
