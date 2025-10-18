@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any, Dict, Iterable, List, Literal, Optional, 
 if TYPE_CHECKING:
     from googleapiclient.discovery import Resource  # pragma: no cover
 
+    from prompt_manager import PromptManager  # pragma: no cover
 from gmail_watch import fetch_history, get_message_metadata, parse_gmail_push_data
 from query_LLM import query_llm
 from supabase_state import BaseStateStore, MailboxState
@@ -143,12 +144,18 @@ class GmailProcessor:
         gmail_service_factory,
         state_store: BaseStateStore,
         classification_prompt_path: Path,
+        prompt_manager: Optional["PromptManager"] = None,
         telegram_token: Optional[str] = None,
         telegram_chat_id: Optional[str] = None,
     ) -> None:
         self.gmail_service_factory = gmail_service_factory
         self.state_store = state_store
-        self.classification_prompt = classification_prompt_path.read_text(encoding="utf-8").strip()
+        self.prompt_manager = prompt_manager
+        if prompt_manager is None:
+            self.classification_prompt = classification_prompt_path.read_text(encoding="utf-8").strip()
+        else:
+            self.classification_prompt = ""  # Unused when prompt manager overrides
+        self.classification_prompt_path = classification_prompt_path
         self.telegram_token = telegram_token
         self.telegram_chat_id = telegram_chat_id
 
@@ -282,11 +289,24 @@ class GmailProcessor:
         await_user_confirmation: bool = True,
         telegram_token: Optional[str] = None,
         telegram_chat_id: Optional[str] = None,
+        notify_via_telegram: bool = True,
+        stop_after_one_batch: bool = False,
+        progress_cb: Optional[callable] = None,
+        is_cancelled: Optional[callable] = None,
     ) -> Dict[str, Any]:
         if batch_size <= 0:
             raise ValueError("batch_size must be a positive integer.")
 
         service = self.gmail_service_factory(email_address)
+        if progress_cb:
+            try:
+                progress_cb({
+                    "type": "job_started",
+                    "email": email_address,
+                    "batch_size": batch_size,
+                })
+            except Exception:
+                pass
         label_cache = _LabelCache(service, email_address)
 
         token = telegram_token or self.telegram_token
@@ -308,6 +328,14 @@ class GmailProcessor:
         reauth_attempted = False
 
         while True:
+            if is_cancelled and is_cancelled():
+                stopped_early = True
+                if progress_cb:
+                    try:
+                        progress_cb({"type": "cancelled"})
+                    except Exception:
+                        pass
+                break
             if stopped_early:
                 break
 
@@ -343,6 +371,15 @@ class GmailProcessor:
                 break
 
             batches_processed += 1
+            if progress_cb:
+                try:
+                    progress_cb({
+                        "type": "batch_started",
+                        "batch_number": batches_processed,
+                        "estimated_total": total_estimate,
+                    })
+                except Exception:
+                    pass
             batch_counts: Counter[str] = Counter()
             batch_error_count = 0
             batch_requiring: List[Dict[str, Any]] = []
@@ -500,13 +537,38 @@ class GmailProcessor:
                             mailbox_email=email_address,
                             decision_json=log_payload,
                         )
+                        # Emit per-message progress event (best-effort)
+                        if progress_cb:
+                            try:
+                                evt: Dict[str, Any] = {
+                                    "type": "message",
+                                    "gmail_id": message_id,
+                                }
+                                if log_payload.get("status") == "processed":
+                                    evt.update({
+                                        "status": "processed",
+                                        "category": decision.category if 'decision' in locals() else None,
+                                        "label": getattr(decision, 'label', None) if 'decision' in locals() else None,
+                                        "subject": headers.get("subject", "(no subject)"),
+                                        "from": headers.get("from", ""),
+                                        "summary": decision.summary if 'decision' in locals() else metadata.get("snippet", ""),
+                                    })
+                                else:
+                                    evt.update({
+                                        "status": "error",
+                                        "error": log_payload.get("error", ""),
+                                    })
+                                progress_cb(evt)
+                            except Exception:
+                                pass
 
             processed_in_batch = len(messages)
             total_processed += processed_in_batch
             page_token = response.get("nextPageToken")
             has_more = bool(page_token)
 
-            if token and chat_id:
+            # Send a per-batch Telegram summary only when explicitly allowed
+            if notify_via_telegram and token and chat_id:
                 decision_outcome = self._send_cleanup_batch_report(
                     email_address=email_address,
                     batch_number=batches_processed,
@@ -527,10 +589,19 @@ class GmailProcessor:
                 if decision_outcome == "stop":
                     stopped_early = True
 
+            # Optional early stop conditions
+            # 1) Respect explicit "single batch" runs (UI endpoint)
+            if stop_after_one_batch:
+                break
+
+            # 2) Fail fast if a whole batch errors (prevents credit burn)
+            if processed_in_batch and batch_error_count >= processed_in_batch:
+                stopped_early = True
+
             if not has_more:
                 break
 
-        return {
+        result = {
             "email": email_address,
             "processed_messages": total_processed,
             "batches_processed": batches_processed,
@@ -541,6 +612,12 @@ class GmailProcessor:
             "error_count": len(errors),
             "stopped_early": stopped_early,
         }
+        if progress_cb:
+            try:
+                progress_cb({"type": "complete", "result": result})
+            except Exception:
+                pass
+        return result
 
     def _classify_message(self, metadata: Dict[str, Any], headers: Dict[str, str]) -> ClassificationDecision:
         prompt_body = self._format_prompt(
@@ -580,8 +657,9 @@ class GmailProcessor:
         date: str,
         snippet: str,
     ) -> str:
+        header = self._classification_prompt_text()
         return (
-            f"{self.classification_prompt}\n"
+            f"{header}\n"
             "\n"
             "Email metadata:\n"
             f"From: {sender}\n"
@@ -606,7 +684,7 @@ class GmailProcessor:
         rendered_snippet = (snippet or "").replace("\r\n", " ").replace("\n", " ").strip()
         if len(rendered_snippet) > 400:
             rendered_snippet = f"{rendered_snippet[:400]}..."
-        return _CLEANUP_PROMPT_TEMPLATE.format(
+        base_prompt = _CLEANUP_PROMPT_TEMPLATE.format(
             existing_labels=labels_text,
             sender=sender,
             to=to,
@@ -614,6 +692,24 @@ class GmailProcessor:
             subject=subject,
             snippet=rendered_snippet,
         )
+        additional = self._additional_cleanup_guidelines()
+        if additional:
+            base_prompt += "\n\nAdditional user adjustments:\n" + additional
+        return base_prompt
+
+    def _classification_prompt_text(self) -> str:
+        if self.prompt_manager:
+            return self.prompt_manager.build_classification_prompt()
+        # Reload the prompt from disk so edits are picked up without restarts.
+        try:
+            return self.classification_prompt_path.read_text(encoding="utf-8").strip()
+        except Exception:
+            return self.classification_prompt
+
+    def _additional_cleanup_guidelines(self) -> str:
+        if not self.prompt_manager:
+            return ""
+        return self.prompt_manager.formatted_criteria()
 
     def _parse_decision(self, response: str) -> ClassificationDecision:
         try:
@@ -937,6 +1033,69 @@ class GmailProcessor:
             disable_notification=False,
         )
         return "stop"
+
+    def apply_manual_cleanup_decision(
+        self,
+        *,
+        email_address: str,
+        gmail_id: str,
+        category: CleanupCategory,
+        label: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        if category not in _CLEANUP_CATEGORY_ORDER:
+            raise ValueError(f"Unsupported cleanup category: {category}")
+        service = self.gmail_service_factory(email_address)
+        label_cache = _LabelCache(service, email_address)
+        metadata: Dict[str, Any] = {}
+        headers: Dict[str, str] = {}
+        try:
+            metadata = get_message_metadata(service, email_address, gmail_id, format_="metadata")
+        except HttpError:
+            metadata = get_message_metadata(service, email_address, gmail_id, format_="full")
+        headers = self._extract_headers(metadata)
+        chosen_label = label if category == "useful_archive" else None
+        decision = InboxCleanupDecision(
+            category=category,
+            confidence=1.0,
+            reason="User override",
+            summary=metadata.get("snippet", ""),
+            label=chosen_label,
+        )
+        action_detail = self._apply_cleanup_decision(
+            service,
+            email_address,
+            gmail_id,
+            decision,
+            label_cache,
+        )
+        log_payload: Dict[str, Any] = {
+            "mode": "manual_override",
+            "metadata": {
+                "snippet": metadata.get("snippet"),
+                "headers": headers,
+            },
+            "decision": {
+                "category": category,
+                "label": action_detail.get("label"),
+                "source": "user",
+                "action": action_detail.get("action"),
+            },
+            "status": "processed",
+            "action_detail": action_detail,
+        }
+        self.state_store.log_message_decision(
+            gmail_id=gmail_id,
+            mailbox_email=email_address,
+            decision_json=log_payload,
+        )
+        return {
+            "gmail_id": gmail_id,
+            "mailbox_email": email_address,
+            "category": category,
+            "label": action_detail.get("label"),
+            "action_detail": action_detail,
+            "headers": headers,
+        }
 
     def _send_telegram_alert(
         self,

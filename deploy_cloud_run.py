@@ -71,6 +71,13 @@ def parse_args() -> argparse.Namespace:
         help="Permit unauthenticated HTTPS access (required for Pub/Sub push).",
     )
     parser.add_argument(
+        "--env",
+        action="append",
+        default=[],
+        metavar="KEY=VALUE",
+        help="Environment variable to set on Cloud Run (can be repeated).",
+    )
+    parser.add_argument(
         "--use-active-gcloud",
         action="store_true",
         help="Use currently logged-in gcloud account (skip key auth).",
@@ -205,6 +212,16 @@ def main() -> int:
         ]
         if args.allow_unauthenticated:
             deploy_cmd.append("--allow-unauthenticated")
+        # pass env vars
+        if args.env:
+            # join multiple --env entries into a single --set-env-vars arg
+            env_list = []
+            for item in args.env:
+                if not item or "=" not in item:
+                    continue
+                env_list.append(item)
+            if env_list:
+                deploy_cmd.extend(["--set-env-vars", ",".join(env_list)])
 
         run_command(deploy_cmd)
 

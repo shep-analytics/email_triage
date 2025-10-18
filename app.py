@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+import asyncio
+import uuid
+import json
 from typing import Any, Dict, List, Optional
 
 from fastapi import Depends, FastAPI, HTTPException, Request, Body
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from google.auth.transport import requests as google_auth_requests
@@ -166,6 +169,10 @@ def gmail_service_factory(email: str):
 
 telegram_token = _telegram_value("TELEGRAM_BOT_TOKEN", keys_telegram_token, "TELEGRAM_BOT_TOKEN")
 telegram_chat_id = _telegram_value("TELEGRAM_CHAT_ID", keys_telegram_chat_id, "TELEGRAM_CHAT_ID")
+# Global kill-switch for Telegram (useful to stop message floods quickly)
+if str(os.getenv("DISABLE_TELEGRAM", "")).strip().lower() in {"1", "true", "yes", "on"}:
+    telegram_token = None
+    telegram_chat_id = None
 
 state_store: BaseStateStore = get_state_store(
     url=_config_value("SUPABASE_URL", "SUPABASE_URL") or keys_SUPABASE_URL,
@@ -280,12 +287,147 @@ async def api_cleanup_run(payload: CleanupRunRequest = Body(...), user=Depends(g
     mailbox = (payload.mailbox_email or user["email"]).strip()
     if not mailbox:
         raise HTTPException(status_code=400, detail="mailbox_email is required.")
+    # UI should run exactly one batch and avoid Telegram notifications
     result = processor.clear_inbox(
         mailbox,
         batch_size=batch_size,
         await_user_confirmation=False,
+        notify_via_telegram=False,
+        stop_after_one_batch=True,
     )
     return result
+
+
+# -----------------------------
+# Live cleanup (SSE + cancel)
+# -----------------------------
+
+class CleanupJob:
+    def __init__(self, job_id: str, owner_email: str) -> None:
+        self.id = job_id
+        self.owner = owner_email
+        self.queue: "asyncio.Queue[dict]" = asyncio.Queue()
+        self.cancel_event = asyncio.Event()
+        self.done = asyncio.Event()
+        self.result: Optional[dict] = None
+        self.error: Optional[str] = None
+
+
+_jobs: Dict[str, CleanupJob] = {}
+
+
+def _sse_format(data: dict, event: Optional[str] = None) -> str:
+    payload = json.dumps(data, ensure_ascii=False)
+    if event:
+        return f"event: {event}\n" f"data: {payload}\n\n"
+    return f"data: {payload}\n\n"
+
+
+async def _enqueue(queue: asyncio.Queue, item: dict) -> None:
+    try:
+        await queue.put(item)
+    except Exception:
+        pass
+
+
+@app.post("/api/cleanup/start")
+async def api_cleanup_start(payload: CleanupRunRequest = Body(...), user=Depends(get_current_user)):
+    batch_size = payload.batch_size or 50
+    if batch_size <= 0 or batch_size > 500:
+        raise HTTPException(status_code=400, detail="batch_size must be between 1 and 500.")
+    mailbox = (payload.mailbox_email or user["email"]).strip()
+    if not mailbox:
+        raise HTTPException(status_code=400, detail="mailbox_email is required.")
+
+    job_id = uuid.uuid4().hex
+    job = CleanupJob(job_id, owner_email=user["email"])
+    _jobs[job_id] = job
+
+    loop = asyncio.get_running_loop()
+
+    def progress_cb(event: dict) -> None:
+        try:
+            loop.call_soon_threadsafe(lambda: job.queue.put_nowait(event))
+        except Exception:
+            pass
+
+    def is_cancelled() -> bool:
+        return job.cancel_event.is_set()
+
+    async def runner() -> None:
+        await _enqueue(job.queue, {"type": "connected", "job_id": job_id})
+        try:
+            # UI runs a single batch by default; Telegram off
+            result = await asyncio.to_thread(
+                processor.clear_inbox,
+                mailbox,
+                batch_size=batch_size,
+                await_user_confirmation=False,
+                notify_via_telegram=False,
+                stop_after_one_batch=True,
+                progress_cb=progress_cb,
+                is_cancelled=is_cancelled,
+            )
+            job.result = result
+            await _enqueue(job.queue, {"type": "complete", "result": result})
+        except Exception as exc:  # noqa: BLE001
+            job.error = str(exc)
+            await _enqueue(job.queue, {"type": "error", "error": job.error})
+        finally:
+            await _enqueue(job.queue, {"type": "end"})
+            job.done.set()
+
+    asyncio.create_task(runner())
+    return {"job_id": job_id}
+
+
+@app.get("/api/cleanup/events/{job_id}")
+async def api_cleanup_events(job_id: str, token: Optional[str] = None):
+    # EventSource cannot set Authorization header; allow token as query param
+    if not token:
+        raise HTTPException(status_code=401, detail="Authentication required.")
+    try:
+        id_info = id_token.verify_oauth2_token(token, _google_request_session, google_client_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=401, detail=f"Invalid ID token: {exc}") from exc
+    email = str(id_info.get("email", "")).lower()
+    job = _jobs.get(job_id)
+    if job is None or job.owner != email:
+        raise HTTPException(status_code=404, detail="Job not found.")
+
+    async def event_generator():
+        # Initial connect event
+        yield _sse_format({"type": "ok", "job_id": job_id})
+        while True:
+            try:
+                item = await asyncio.wait_for(job.queue.get(), timeout=15)
+                yield _sse_format(item)
+                if item.get("type") == "end":
+                    break
+            except asyncio.TimeoutError:
+                # Keep-alive ping
+                yield "event: ping\n" "data: {}\n\n"
+
+        # Cleanup completed; drop from registry
+        try:
+            _jobs.pop(job_id, None)
+        except Exception:
+            pass
+
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
+
+
+class CancelPayload(BaseModel):
+    job_id: str
+
+
+@app.post("/api/cleanup/cancel")
+async def api_cleanup_cancel(payload: CancelPayload = Body(...), user=Depends(get_current_user)):
+    job = _jobs.get(payload.job_id)
+    if not job or job.owner != user["email"]:
+        raise HTTPException(status_code=404, detail="Job not found.")
+    job.cancel_event.set()
+    return {"status": "cancelling"}
 
 
 @app.post("/api/cleanup/feedback")

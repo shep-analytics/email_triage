@@ -11,7 +11,7 @@ Architecture
 - Prompting `classification_prompt.txt` + `prompt_manager.py`: Base system prompt plus persisted user “criteria” refinements editable via the web UI/API.
 - State `supabase_state.py`: Writes/reads mailbox checkpoints, message decisions, and alert rows via Supabase REST; includes `NullStateStore` fallback if Supabase is not configured.
 - Notifications `telegram_notify.py`: Thin Telegram Bot API wrapper with optional interactive callback support.
-- LLM client `query_LLM.py`: Single-turn request to OpenRouter. Expects strict JSON from models. Requires OpenRouter API key.
+- LLM client `query_LLM.py`: Single-turn request to OpenRouter. Expects strict JSON from models. Requires OpenRouter API key. Default model: `openai/gpt-5` (override via `OPENROUTER_MODEL`).
 - Web UI `static/`: Login (GIS), run batch cleanup, view summaries, and submit feedback that creates criteria.
 
 Configuration
@@ -30,6 +30,8 @@ Configuration
   - `GMAIL_ALLOW_OAUTH_FLOW=1`: Permit interactive OAuth token flow if token missing/invalid.
   - `GMAIL_AUTO_REAUTH=1`: Attempt one interactive reauth on insufficient-scope errors.
   - `GMAIL_EXTRA_SCOPES`: Comma-separated list appended to default scopes.
+  - `DISABLE_TELEGRAM=1`: Global kill-switch to disable all Telegram sends.
+  - `OPENROUTER_MODEL`: Override the default LLM model (default is `openai/gpt-5`).
 
 **Hands-Off Deployment (Zero-Input)**
 - Goal: allow the agent to build/deploy, wire Pub/Sub + Gmail watches, persist to Supabase, and run digests without human steps.
@@ -60,6 +62,7 @@ Configuration
 - Scheduler jobs (auto‑created by the verifier if allowed):
   - Refresh watches: POST `/gmail/watch` every 12h.
   - Daily digest: POST `/alerts/digest` at your chosen time.
+- if anything you change needs to be done
 
 Notes
 - It is acceptable in this project to commit keys and tokens to the repo for speed of iteration. Do not delete committed keys.
@@ -69,6 +72,9 @@ Endpoints (FastAPI)
 - `GET /` — Serves `static/index.html` UI.
 - `GET /api/config` — Client config for UI (Google client id, allowed emails, criteria count).
 - `POST /api/cleanup/run` — Runs one cleanup batch on the authenticated user’s mailbox (overridable in body). Requires GIS ID token in `Authorization: Bearer <token>`.
+- `POST /api/cleanup/start` — Starts a live cleanup job (single batch, Telegram disabled). Returns `{ job_id }`.
+- `GET /api/cleanup/events/{job_id}?token=<ID_TOKEN>` — Server‑Sent Events stream of progress logs and results for that job.
+- `POST /api/cleanup/cancel` — Cancels a running cleanup job `{ job_id }`.
 - `POST /api/cleanup/feedback` — Applies a manual cleanup decision to a Gmail message and appends a human-readable “criterion” to the prompt.
 - `GET /api/criteria` — List prompt criteria.
 - `POST /api/criteria` — Create criterion.
@@ -163,6 +169,17 @@ What Future Agents Should Know
 - For tests and local validation, prefer using `verify_e2e.py` or dry runs. Avoid writing broad integration tests that call external APIs unless feature work requires it.
 - please update this file AGENTS.md after all calls if anything has changed. This file AGENTS.md should remain up to date, anything changed should be reflected in this file and this file should remain up to date.
 
+Commit/Push + Verify Policy
+- After every change you make to files in this repo, you must: (1) commit, (2) push, and (3) run end-to-end verification.
+- Steps to follow each time:
+  - Stage changes: `git add -A` (do not delete committed keys; committing keys in this repo is acceptable per project policy).
+  - Commit: `git commit -m "agent: <brief summary of change>"`.
+  - Push: `git push origin main`.
+- Verify: run `python3 verify_e2e.py --key-file json_keys/owner_google_service_account_key.json --region us-central1 --service email-triage --subscription email-triage-push --email <one_of_GMAIL_ACCOUNTS>`.
+- If verification fails due to transient issues, rerun once. If it still fails, surface the error, do not roll back, and add a note to the Updates section.
+- Always update this AGENTS.md if the workflow, commands, or assumptions change.
+  - Note on push protection: if GitHub blocks the push due to detected secrets (e.g., Google service-account JSON), do not include that file in the commit. Keep it locally under `json_keys/` and pass it via `--key-file` or configure via CI secrets. Never delete already-committed keys from history in this project.
+
 Common Pitfalls
 - 403 insufficientPermissions from Gmail: scope mismatch with stored token; set `GMAIL_AUTO_REAUTH=1` and revisit consent locally with `GMAIL_ALLOW_OAUTH_FLOW=1`.
 - Pub/Sub push rejected: Topic missing Gmail publisher role or webhook unauthenticated/incorrect URL.
@@ -177,4 +194,20 @@ Runbooks — Handy Commands
 - One-shot cleanup: `python3 run_cleanup.py you@example.com --batch-size 50`
 
 Updates
+- 2025-10-18: Agent workflow — enforce commit/push/verify after every change. Added explicit steps and command line to AGENTS.md.
 - 2025-10-18: Frontend error handling improved. The web console now normalizes FastAPI error payloads (including 422 validation arrays and nested objects) into readable messages, so users will no longer see "[object Object]" after pressing "Process next batch". No backend contract changes required.
+- 2025-10-18: Batch cleanup safety + UX. The `/api/cleanup/run` endpoint now processes exactly one batch (one Gmail page) and suppresses Telegram notifications by default. This prevents long-running cleanups from the UI and avoids Telegram spam. The processor also fails fast if a batch is 100% errors (stops further batches), reducing API credit burn when misconfigured.
+  - `DISABLE_TELEGRAM` env toggle added as a global kill-switch.
+  - Default OpenRouter model set to `openai/gpt-5`. Override via env `OPENROUTER_MODEL` if needed.
+- 2025-10-18: Live cleanup + cancel. Added streaming cleanup with SSE and a UI log:
+  - New endpoints: `/api/cleanup/start`, `/api/cleanup/events/{job_id}`, `/api/cleanup/cancel`.
+  - UI shows live per‑message updates and running counts, plus a Stop button.
+  - Streaming uses a query param `token=<ID_TOKEN>` for GIS auth on EventSource.
+  - UI cleanup still processes exactly one batch per run and suppresses Telegram.
+  - Inlined SVG favicon to eliminate `/favicon.ico` 404.
+- 2025-10-18: E2E verify/deploy. Ran `verify_e2e.py` which rebuilt/deployed to Cloud Run, ensured Pub/Sub topic + push subscription, refreshed Gmail watches, and installed Cloud Scheduler jobs. Current resolved service URL: `https://email-triage-rq4d232cbq-uc.a.run.app` (the previous regional URL also routes). Push subscription `email-triage-push` now targets `<RUN_URL>/gmail/push`.
+
+Behavioral Notes
+- UI batch runs: one batch only, no Telegram. Call again to process the next batch.
+- Programmatic cleanup `/gmail/cleanup`: unchanged defaults. Use `await_user_confirmation=true` to require Telegram “Continue/Stop” between batches, or `false` to auto-continue. It still sends Telegram batch summaries unless you override by passing `telegram_token`/`telegram_chat_id` as null values and set `notify_via_telegram=False` in code usage.
+- Fail-fast: If a batch has only errors, cleanup stops early and returns `stopped_early: true`.

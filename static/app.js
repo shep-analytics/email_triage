@@ -21,10 +21,12 @@ const userEmailEl = document.getElementById("user-email");
 const cleanupStatus = document.getElementById("cleanup-status");
 const cleanupSummary = document.getElementById("cleanup-summary");
 const cleanupCounts = document.getElementById("cleanup-counts");
+const cleanupLog = document.getElementById("cleanup-log");
 const requiresResponseList = document.getElementById("requires-response-list");
 const shouldReadList = document.getElementById("should-read-list");
 const batchSizeInput = document.getElementById("batch-size");
 const runCleanupBtn = document.getElementById("run-cleanup");
+const cancelCleanupBtn = document.getElementById("cancel-cleanup");
 const logoutBtn = document.getElementById("logout-btn");
 const newCriterionForm = document.getElementById("new-criterion-form");
 const newCriterionText = document.getElementById("new-criterion-text");
@@ -69,6 +71,9 @@ function updateLoginHint() {
 function setupEventHandlers() {
   if (runCleanupBtn) {
     runCleanupBtn.addEventListener("click", handleRunCleanup);
+  }
+  if (cancelCleanupBtn) {
+    cancelCleanupBtn.addEventListener("click", handleCancelCleanup);
   }
   if (logoutBtn) {
     logoutBtn.addEventListener("click", handleLogout);
@@ -180,21 +185,156 @@ async function handleRunCleanup() {
     setStatus(cleanupStatus, "Batch size must be between 1 and 500.", true);
     return;
   }
-  setStatus(cleanupStatus, "Processing inbox batch...", false);
+  // Start streaming job
+  if (cleanupLog) cleanupLog.innerHTML = "";
+  cleanupSummary.classList.add("hidden");
+  displayCounts({});
+  setStatus(cleanupStatus, "Starting cleanup...", false);
   runCleanupBtn.disabled = true;
+  cancelCleanupBtn.classList.remove("hidden");
+  cancelCleanupBtn.disabled = false;
   try {
-    const result = await apiFetch("/api/cleanup/run", {
+    const { job_id } = await apiFetch("/api/cleanup/start", {
       method: "POST",
       body: JSON.stringify({ batch_size: batchSize }),
     });
-    displayCleanupResult(result);
-    const processed = result.processed_messages ?? 0;
-    const batches = result.batches_processed ?? 0;
-    setStatus(cleanupStatus, `Processed ${processed} message(s) across ${batches} batch(es).`, false);
+    state.currentJobId = job_id;
+    streamCleanupEvents(job_id);
   } catch (error) {
     setStatus(cleanupStatus, error.message, true);
-  } finally {
     runCleanupBtn.disabled = false;
+    cancelCleanupBtn.classList.add("hidden");
+  }
+}
+
+async function handleCancelCleanup() {
+  if (!state.currentJobId) {
+    return;
+  }
+  try {
+    cancelCleanupBtn.disabled = true;
+    await apiFetch("/api/cleanup/cancel", {
+      method: "POST",
+      body: JSON.stringify({ job_id: state.currentJobId }),
+    });
+    appendLog("Cancellation requested. Waiting for current step to finish...");
+  } catch (error) {
+    appendLog(`Failed to cancel: ${error.message}`);
+    cancelCleanupBtn.disabled = false;
+  }
+}
+
+function streamCleanupEvents(jobId) {
+  const url = `/api/cleanup/events/${encodeURIComponent(jobId)}?token=${encodeURIComponent(state.token)}`;
+  const es = new EventSource(url);
+  const counts = {};
+  appendLog(`Connected to job ${jobId}`);
+  es.onmessage = (evt) => {
+    if (!evt.data) return;
+    try {
+      const msg = JSON.parse(evt.data);
+      handleCleanupEvent(msg, counts, es);
+    } catch (_e) {
+      // ignore malformed
+    }
+  };
+  es.addEventListener("ping", () => {
+    // keepalive
+  });
+  es.onerror = () => {
+    // Connection broken; UI will reflect completion or error from last message.
+    es.close();
+  };
+}
+
+function handleCleanupEvent(event, counts, es) {
+  switch (event.type) {
+    case "ok": {
+      // initial connect
+      break;
+    }
+    case "job_started": {
+      setStatus(cleanupStatus, `Processing up to ${event.batch_size} messages...`, false);
+      appendLog(`Job started for ${event.email}`);
+      break;
+    }
+    case "batch_started": {
+      appendLog(`Batch ${event.batch_number} started`);
+      break;
+    }
+    case "message": {
+      if (event.status === "processed") {
+        const cat = event.category || "unknown";
+        counts[cat] = (counts[cat] || 0) + 1;
+        displayCounts(counts);
+        appendLog(`✔ ${event.subject || "(no subject)"} — ${cat}${event.label ? ` [${event.label}]` : ""}`);
+      } else if (event.status === "error") {
+        appendLog(`✖ Error on a message: ${event.error || "unknown"}`);
+      }
+      break;
+    }
+    case "batch_summary": {
+      // Currently not emitted; reserved for future use
+      break;
+    }
+    case "cancelled": {
+      appendLog("Job cancelled by user.");
+      break;
+    }
+    case "complete": {
+      const result = event.result || {};
+      displayCleanupResult(result);
+      const processed = result.processed_messages ?? 0;
+      const batches = result.batches_processed ?? 0;
+      setStatus(cleanupStatus, `Processed ${processed} message(s) across ${batches} batch(es).`, false);
+      appendLog("Job complete.");
+      endCleanupSession(es);
+      break;
+    }
+    case "error": {
+      setStatus(cleanupStatus, event.error || "Unexpected error", true);
+      appendLog(`Error: ${event.error || "Unexpected error"}`);
+      endCleanupSession(es);
+      break;
+    }
+    case "end": {
+      // Stream end
+      endCleanupSession(es);
+      break;
+    }
+    default: {
+      // ignore
+    }
+  }
+}
+
+function endCleanupSession(es) {
+  try { es && es.close && es.close(); } catch (_e) {}
+  runCleanupBtn.disabled = false;
+  cancelCleanupBtn.classList.add("hidden");
+  state.currentJobId = null;
+}
+
+function appendLog(line) {
+  if (!cleanupLog) return;
+  const el = document.createElement("div");
+  el.className = "log-line";
+  el.textContent = line;
+  cleanupLog.appendChild(el);
+  cleanupLog.scrollTop = cleanupLog.scrollHeight;
+}
+
+function displayCounts(counts) {
+  // Update the counts box incrementally
+  cleanupCounts.innerHTML = "";
+  const entries = Object.entries(counts || {});
+  if (!entries.length) return;
+  for (const [key, value] of entries) {
+    const item = document.createElement("div");
+    item.className = "count-item";
+    const label = CATEGORY_LABELS[key] || key;
+    item.textContent = `${label}: ${value}`;
+    cleanupCounts.appendChild(item);
   }
 }
 

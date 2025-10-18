@@ -47,3 +47,15 @@ SUPABASE_ANON_KEY = None  # Optional, read from env SUPABASE_ANON_KEY
 # Leave these as None to fall back to keys.py or environment variables.
 TELEGRAM_BOT_TOKEN = None  # Prefer env TELEGRAM_BOT_TOKEN
 TELEGRAM_CHAT_ID = None    # Prefer env TELEGRAM_CHAT_ID
+
+
+# Web configuration ---------------------------------------------------------
+
+# List of Google accounts allowed to log into the web console.
+ALLOWED_LOGIN_EMAILS = [
+    "alexsheppert@gmail.com",
+]
+
+# Google OAuth client ID for verifying ID tokens issued by Google Identity Services.
+# This must match the client ID configured in the web app.
+GOOGLE_OAUTH_CLIENT_ID = None

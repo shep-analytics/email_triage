@@ -4,6 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Email Triage Console</title>
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='48' y='8' rx='8' ry='8' fill='%231f2937'/%3E%3Cpath d='M8 16l24 16L56 16' stroke='%23ffffff' stroke-width='4' fill='none'/%3E%3C/svg%3E" />
     <link rel="stylesheet" href="/static/styles.css" />
     <script src="https://accounts.google.com/gsi/client" async defer></script>
   </head>
@@ -34,9 +35,11 @@
                 <input type="number" id="batch-size" value="50" min="1" max="500" />
               </label>
               <button id="run-cleanup">Process next batch</button>
+              <button id="cancel-cleanup" class="danger hidden">Stop</button>
             </div>
           </div>
           <div id="cleanup-status" class="status"></div>
+          <div id="cleanup-log" class="log"></div>
           <div id="cleanup-summary" class="hidden">
             <div id="cleanup-counts" class="counts"></div>
             <div class="message-groups">

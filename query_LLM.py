@@ -45,8 +45,11 @@ def query_llm(
 
     resolved_key = _resolve_api_key(api_key)
 
+    # Allow overriding the model via environment without changing code
+    chosen_model = os.getenv("OPENROUTER_MODEL") or model or DEFAULT_MODEL
+
     payload = {
-        "model": model,
+        "model": chosen_model,
         "messages": [
             {"role": "user", "content": prompt},
         ],

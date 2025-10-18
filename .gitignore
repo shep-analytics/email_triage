@@ -13,3 +13,4 @@ email-assistant-service-key.json
 # IDE
 .idea/
 .vscode/
+json_keys/
