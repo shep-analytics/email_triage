@@ -20,11 +20,18 @@ import json
 import subprocess
 import sys
 from pathlib import Path
+import re
+import time
 
 
 def run_command(command: list[str], *, check: bool = True) -> None:
     print(f"+ {' '.join(command)}")
     subprocess.run(command, check=check)
+
+
+def run_capture(command: list[str], *, check: bool = True) -> subprocess.CompletedProcess:
+    print(f"+ {' '.join(command)}")
+    return subprocess.run(command, check=check, capture_output=True, text=True)
 
 
 def load_project_id(key_path: Path) -> str:
@@ -109,16 +116,80 @@ def main() -> int:
         run_command(["gcloud", "config", "set", "project", project_id])
 
         if not args.skip_build:
-            run_command(
-                [
-                    "gcloud",
-                    "builds",
-                    "submit",
-                    "--suppress-logs",
-                    "--tag",
-                    image,
-                ]
+            # Submit build without streaming logs to avoid VPC-SC/log bucket restrictions.
+            # Use --async and poll build status via 'gcloud builds describe'.
+            submit_cmd = [
+                "gcloud",
+                "builds",
+                "submit",
+                "--async",
+                "--format=json",
+                "--tag",
+                image,
+            ]
+            try:
+                cp = run_capture(submit_cmd)
+            except subprocess.CalledProcessError as exc:
+                # Even with --async, gcloud may print helpful context; include it.
+                sys.stderr.write(exc.stderr or "")
+                sys.stderr.write(exc.stdout or "")
+                return exc.returncode
+
+            # Try to extract build ID from JSON output; fallback to regex if needed.
+            build_id: str | None = None
+            try:
+                op = json.loads(cp.stdout.strip() or "{}")
+                # Expected path for async submit: metadata.build.id
+                metadata = op.get("metadata") or {}
+                build = metadata.get("build") or {}
+                build_id = build.get("id")
+            except json.JSONDecodeError:
+                build_id = None
+
+            if not build_id:
+                # Fallback: parse from any '/builds/<id>' occurrence in stdout/stderr
+                combined = f"{cp.stdout}\n{cp.stderr}"
+                m = re.search(r"/builds/([a-f0-9\-]+)", combined)
+                if m:
+                    build_id = m.group(1)
+
+            if not build_id:
+                print("Unable to determine Cloud Build ID from submission output.", file=sys.stderr)
+                # Provide the console link if present in output for manual tracking
+                for line in (cp.stdout or "").splitlines():
+                    if "cloudbuild.googleapis.com" in line:
+                        print(line)
+                return 1
+
+            print(f"Submitted build ID: {build_id}")
+            print(
+                f"Track: https://console.cloud.google.com/cloud-build/builds/{build_id}?project={project_id}"
             )
+
+            # Poll build status without streaming logs
+            status = "UNKNOWN"
+            describe_cmd_base = [
+                "gcloud",
+                "builds",
+                "describe",
+                build_id,
+                "--format=value(status)",
+            ]
+            while True:
+                try:
+                    cp2 = run_capture(describe_cmd_base)
+                except subprocess.CalledProcessError as exc:
+                    sys.stderr.write(exc.stderr or "")
+                    sys.stderr.write(exc.stdout or "")
+                    return exc.returncode
+                status = (cp2.stdout or "").strip().upper()
+                if status in {"SUCCESS", "FAILURE", "CANCELLED", "TIMEOUT", "INTERNAL_ERROR"}:
+                    print(f"Build completed with status: {status}")
+                    if status != "SUCCESS":
+                        return 2
+                    break
+                # Still building
+                time.sleep(2)
 
         deploy_cmd = [
             "gcloud",
