@@ -1,0 +1,26 @@
+# Files and directories to skip uploading to Cloud Build.
+# See: gcloud topic gcloudignore
+
+# VCS
+.git/
+
+# Python
+__pycache__/
+*.pyc
+
+# Virtual environments
+venv/
+.venv/
+
+# Local auth tokens and secrets
+# Keep the Gmail OAuth tokens so the service can authenticate to Gmail without interactive flow.
+# The service account key should not be baked into the image.
+email-assistant-service-key.json
+
+# IDE/editor files
+.DS_Store
+.idea/
+.vscode/
+
+# GitHub config not needed for build
+.github/

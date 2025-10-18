@@ -1,0 +1,46 @@
+name: Deploy to Cloud Run
+
+on:
+  push:
+    branches: [ main ]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+      REGION: us-central1
+      SERVICE_NAME: email-triage
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Auth to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          # Option A: JSON key secret (simplest to start)
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+          # Option B (recommended later): Workload Identity Federation
+          # create a provider + service account binding and use:
+          # workload_identity_provider: ${{ secrets.GCP_WIF_PROVIDER }}
+          # service_account: ${{ secrets.GCP_WIF_SA }}
+
+      - name: Setup gcloud
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Configure project
+        run: gcloud config set project "$PROJECT_ID"
+
+      - name: Build image with Cloud Build
+        run: gcloud --quiet builds submit --tag "gcr.io/${PROJECT_ID}/${SERVICE_NAME}"
+
+      - name: Deploy to Cloud Run
+        run: >-
+          gcloud --quiet run deploy "$SERVICE_NAME"
+          --image "gcr.io/${PROJECT_ID}/${SERVICE_NAME}"
+          --region "$REGION"
+          --allow-unauthenticated
+

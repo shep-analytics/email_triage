@@ -1,0 +1,23 @@
+Goal: Multi-account email triage that (1) classifies each new email with an LLM using a natural-language criteria prompt, (2) sends me a one-to-two-sentence Telegram summary only for alerts I’d actually read/respond to, (3) otherwise auto-archives (or deletes if the model is sure it’s junk).
+
+Minimal components
+
+Ingest: Gmail Push (Pub/Sub) + IMAP IDLE fallback.
+
+Classify: OpenRouter LLM call with strict JSON output.
+
+Act: Gmail/IMAP modify → archive/delete; optional label.
+
+Notify: Telegram bot for ALERT only.
+
+State: supabase free tier
+
+Ops: /healthz, /dry-run, config hot-reload.
+
+Decisions JSON (strict)
+
+Here is the information for OpenRouter:
+
+Take the old query_LLM and make it literally just an input - output that takes a prompt and doesn't have any prompt in that file at all. Use the keys.py where the openrouter key is. Test that.
+
+Also, for telegram please walk me through setting up the bot with notifications there. And then do the same for connecting the gmail accounts so we can test this. And for supabase and everything else needed.
