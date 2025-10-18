@@ -4,6 +4,8 @@ Deploy the email triage service to Cloud Run using a service account key.
 
 Usage:
     python3 deploy_cloud_run.py --key-file email-assistant-service-key.json
+    # or use your active gcloud auth instead of a key file:
+    python3 deploy_cloud_run.py --use-active-gcloud
 
 Optional flags:
     --region us-central1
@@ -34,8 +36,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Build and deploy the Cloud Run service.")
     parser.add_argument(
         "--key-file",
-        required=True,
-        help="Path to the service account key JSON.",
+        help="Path to the service account key JSON. If omitted, use --use-active-gcloud.",
     )
     parser.add_argument(
         "--region",
@@ -62,28 +63,48 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Permit unauthenticated HTTPS access (required for Pub/Sub push).",
     )
+    parser.add_argument(
+        "--use-active-gcloud",
+        action="store_true",
+        help="Use currently logged-in gcloud account (skip key auth).",
+    )
     return parser.parse_args()
 
 
 def main() -> int:
     args = parse_args()
-    key_path = Path(args.key_file).expanduser().resolve()
-    if not key_path.exists():
-        print(f"Service account key not found: {key_path}", file=sys.stderr)
+    project_id: str
+    key_path: Path | None = None
+    if args.key_file:
+        key_path = Path(args.key_file).expanduser().resolve()
+        if not key_path.exists():
+            print(f"Service account key not found: {key_path}", file=sys.stderr)
+            return 1
+        project_id = load_project_id(key_path)
+    elif args.use_active_gcloud:
+        try:
+            cp = subprocess.run(["gcloud", "config", "get-value", "project"], check=True, capture_output=True, text=True)
+            project_id = (cp.stdout or "").strip()
+        except subprocess.CalledProcessError:
+            project_id = ""
+        if not project_id:
+            print("No project configured. Run: gcloud config set project <PROJECT_ID> or provide --key-file.", file=sys.stderr)
+            return 1
+    else:
+        print("Provide --key-file or use --use-active-gcloud.", file=sys.stderr)
         return 1
-
-    project_id = load_project_id(key_path)
     image = f"gcr.io/{project_id}/{args.image_repo}"
 
     try:
-        run_command(
-            [
-                "gcloud",
-                "auth",
-                "activate-service-account",
-                f"--key-file={key_path}",
-            ]
-        )
+        if key_path is not None:
+            run_command(
+                [
+                    "gcloud",
+                    "auth",
+                    "activate-service-account",
+                    f"--key-file={key_path}",
+                ]
+            )
 
         run_command(["gcloud", "config", "set", "project", project_id])
 
