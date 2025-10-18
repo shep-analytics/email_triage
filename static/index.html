@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Email Triage Console</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+    <script src="https://accounts.google.com/gsi/client" async defer></script>
+  </head>
+  <body>
+    <div id="root">
+      <section id="login-view" class="card">
+        <h1>Email Triage Console</h1>
+        <p>Sign in with Google to manage inbox cleanup.</p>
+        <div id="google-signin"></div>
+        <p class="hint">Only the configured Google account may access this console.</p>
+      </section>
+
+      <section id="app-view" class="hidden">
+        <header class="app-header">
+          <div>
+            <h1>Inbox Cleanup Console</h1>
+            <p id="user-email"></p>
+          </div>
+          <button id="logout-btn" class="secondary">Sign out</button>
+        </header>
+
+        <section id="cleanup-section" class="card">
+          <div class="section-header">
+            <h2>Cleanup Batches</h2>
+            <div class="cleanup-controls">
+              <label>
+                Batch size
+                <input type="number" id="batch-size" value="50" min="1" max="500" />
+              </label>
+              <button id="run-cleanup">Process next batch</button>
+            </div>
+          </div>
+          <div id="cleanup-status" class="status"></div>
+          <div id="cleanup-summary" class="hidden">
+            <div id="cleanup-counts" class="counts"></div>
+            <div class="message-groups">
+              <div class="message-column">
+                <h3>Requires response</h3>
+                <div id="requires-response-list" class="message-list"></div>
+              </div>
+              <div class="message-column">
+                <h3>Should read</h3>
+                <div id="should-read-list" class="message-list"></div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section id="criteria-section" class="card">
+          <div class="section-header">
+            <h2>Prompt Criteria</h2>
+            <button id="refresh-criteria" class="secondary">Refresh list</button>
+          </div>
+          <div id="criteria-status" class="status"></div>
+          <form id="new-criterion-form">
+            <label for="new-criterion-text">Add new criterion</label>
+            <textarea id="new-criterion-text" rows="3" placeholder="Describe how the AI should treat a certain kind of email."></textarea>
+            <div class="form-actions">
+              <button type="submit">Add criterion</button>
+            </div>
+          </form>
+          <div id="criteria-list" class="criteria-list"></div>
+        </section>
+      </section>
+    </div>
+
+    <script type="module" src="/static/app.js"></script>
+  </body>
+</html>

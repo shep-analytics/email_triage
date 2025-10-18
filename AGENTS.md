@@ -1,0 +1,180 @@
+Email Triage Service — Agent Guide and Repo Map
+
+Overview
+- Purpose: Classify and triage incoming Gmail messages using an LLM, apply Gmail actions (archive/delete/label), and notify via Telegram only when useful. Persists state to Supabase. Ships a small web console for batch cleanup and prompt tuning.
+- Core flow: Gmail Push (Pub/Sub) -> FastAPI webhook -> GmailProcessor -> LLM (OpenRouter) -> Gmail API actions -> Telegram alerts -> State in Supabase.
+
+Architecture
+- Entrypoint `app.py`: FastAPI app exposing endpoints for Gmail push, watch registration, batch cleanup, prompt criteria CRUD, daily digest, and a health check. Serves a minimal web UI from `static/` secured by Google Identity ID tokens.
+- Gmail API client `gmail_watch.py`: Builds service via OAuth token or service-account delegation; starts watches; fetches history; parses Pub/Sub payloads.
+- Processor `gmail_processor.py`: Orchestrates history processing, calls the LLM, applies Gmail modifications, logs decisions to Supabase (or in-memory fallback), and sends Telegram alerts/digests.
+- Prompting `classification_prompt.txt` + `prompt_manager.py`: Base system prompt plus persisted user “criteria” refinements editable via the web UI/API.
+- State `supabase_state.py`: Writes/reads mailbox checkpoints, message decisions, and alert rows via Supabase REST; includes `NullStateStore` fallback if Supabase is not configured.
+- Notifications `telegram_notify.py`: Thin Telegram Bot API wrapper with optional interactive callback support.
+- LLM client `query_LLM.py`: Single-turn request to OpenRouter. Expects strict JSON from models. Requires OpenRouter API key.
+- Web UI `static/`: Login (GIS), run batch cleanup, view summaries, and submit feedback that creates criteria.
+
+Configuration
+- Preferred configuration lives in `config.py`. Environment variables of the same names always override. Optional `keys.py` can provide `telegram_token`, `telegram_chat_id`, and `OPENROUTER_API_Key`. It also supports `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` (the app will read these if not set in env/config), plus optional `GOOGLE_OAUTH_CLIENT_ID` and deploy helpers like `GCP_PROJECT_ID` and `GCP_SERVICE_ACCOUNT_KEY_FILE`.
+- Important settings (via `config.py` or env):
+  - `GMAIL_ACCOUNTS`: Comma-separated list of mailboxes to watch/clean.
+  - `GMAIL_CLIENT_SECRET_PATH`: OAuth client JSON (desktop/web). Env alias: `GMAIL_OAUTH_CLIENT_SECRET`.
+  - `GMAIL_OAUTH_TOKEN_DIR`: Directory with per-account token JSON files (default: `.gmail_tokens`).
+  - `GMAIL_SERVICE_ACCOUNT_FILE`/`GMAIL_DELEGATED_USER`: Alternative auth using domain-wide delegation.
+  - `GMAIL_TOPIC_NAME`: Pub/Sub topic for Gmail push.
+  - `CLASSIFICATION_PROMPT_PATH`: Path to base prompt.
+  - `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY` (required for real persistence; otherwise uses in-memory fallback).
+  - `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` for alerts and batch confirmations.
+  - `ALLOWED_LOGIN_EMAILS`, `GOOGLE_OAUTH_CLIENT_ID` for the web console’s GIS login.
+- Optional runtime toggles:
+  - `GMAIL_ALLOW_OAUTH_FLOW=1`: Permit interactive OAuth token flow if token missing/invalid.
+  - `GMAIL_AUTO_REAUTH=1`: Attempt one interactive reauth on insufficient-scope errors.
+  - `GMAIL_EXTRA_SCOPES`: Comma-separated list appended to default scopes.
+
+**Hands-Off Deployment (Zero-Input)**
+- Goal: allow the agent to build/deploy, wire Pub/Sub + Gmail watches, persist to Supabase, and run digests without human steps.
+- Provide these items (commit to repo or pass via env/Secrets as you prefer):
+  - `json_keys/owner_google_service_account_key.json` with project-level deploy rights (already added).
+  - Supabase: configured via `keys.py`.
+  - LLM: configured via `keys.py`.
+  - Gmail auth path (choose one):
+    - OAuth tokens per mailbox under `.gmail_tokens/` plus `json_keys/client_secret_desktop.json` (works for consumer Gmail), or
+    - Service Account with Domain‑Wide Delegation + delegated user email(s) (Workspace only).
+  - Telegram: configured via `keys.py` (optional).
+  - Web UI auth: `GOOGLE_OAUTH_CLIENT_ID` in `keys.py`; allowed emails in `config.py` (`ALLOWED_LOGIN_EMAILS`).
+
+**Secrets**
+- All required secrets are already present in `keys.py` (Supabase, Telegram, OpenRouter, GCP project details, and Google OAuth Client ID). Update that file if values change.
+- Gmail auth is configured via `config.py` and local tokens/service account. See `docs/gmail_setup.md` only if you are adding new mailboxes or changing auth mode.
+
+**Zero-Input Deploy Steps**
+- Ensure `config.py` has:
+  - `GMAIL_ACCOUNTS` populated and `GMAIL_TOPIC_NAME` set (e.g., `projects/<project>/topics/email-triage`).
+  - Supabase URL/key present (or environment variables configured at deploy).
+  - Gmail auth method configured (OAuth tokens or DWD SA).
+- Build + deploy to Cloud Run using the owner key:
+  - `python3 deploy_cloud_run.py --key-file json_keys/owner_google_service_account_key.json --region us-central1 --service email-triage --allow-unauthenticated`
+- Wire Pub/Sub and verify end‑to‑end automatically:
+  - `python3 verify_e2e.py --key-file json_keys/owner_google_service_account_key.json --region us-central1 --service email-triage --subscription email-triage-push --email <one_of_GMAIL_ACCOUNTS>`
+  - The script grants the Gmail publisher to the topic, (create|update)s the push subscription to `<RUN_URL>/gmail/push`, calls `/gmail/watch`, and runs a dry‑run classification.
+- Scheduler jobs (auto‑created by the verifier if allowed):
+  - Refresh watches: POST `/gmail/watch` every 12h.
+  - Daily digest: POST `/alerts/digest` at your chosen time.
+
+Notes
+- It is acceptable in this project to commit keys and tokens to the repo for speed of iteration. Do not delete committed keys.
+- If you prefer secret managers, use Cloud Run `--set-env-vars` or Secret Manager bindings; the deploy scripts already support that pattern.
+
+Endpoints (FastAPI)
+- `GET /` — Serves `static/index.html` UI.
+- `GET /api/config` — Client config for UI (Google client id, allowed emails, criteria count).
+- `POST /api/cleanup/run` — Runs one cleanup batch on the authenticated user’s mailbox (overridable in body). Requires GIS ID token in `Authorization: Bearer <token>`.
+- `POST /api/cleanup/feedback` — Applies a manual cleanup decision to a Gmail message and appends a human-readable “criterion” to the prompt.
+- `GET /api/criteria` — List prompt criteria.
+- `POST /api/criteria` — Create criterion.
+- `PATCH /api/criteria/{id}` — Update text and/or enabled flag.
+- `DELETE /api/criteria/{id}` — Delete criterion.
+- `POST /dry-run` — Non-auth test: classify a synthetic email via LLM; does not modify Gmail.
+- `POST /gmail/push` — Pub/Sub push webhook for Gmail notifications (expects Pub/Sub envelope with base64 `data`).
+- `POST /gmail/watch` — Registers or refreshes Gmail watches for all configured accounts (needs `GMAIL_TOPIC_NAME`).
+- `POST /gmail/cleanup` — Programmatic cleanup (used by `run_cleanup.py`).
+- `GET /health` or `GET /healthz` — Health information (mailbox watch/checkpoint state, telegram, and store mode).
+- `POST /alerts/digest` — Sends grouped Telegram digests for queued “alert_today” items.
+- `POST /cron/refresh`, `POST /cron/digest` — Unauthenticated cron-friendly aliases.
+
+Data Model (Supabase tables)
+- `mailboxes(email, history_id, watch_expiration)` — One row per mailbox.
+- `messages(gmail_id, mailbox_email, decision_json, processed_at, state)` — Decision/audit log.
+- `alerts(gmail_id, mailbox_email, summary, status, error_detail)` — Alert send/queue state.
+- If Supabase isn’t configured, decisions/alerts are kept in-memory by `NullStateStore`.
+
+Local Development — Quickstart
+1) Python 3.11+, `pip install -r requirements.txt`.
+2) LLM: export `OPENROUTER_API_KEY=...` or create `keys.py` with `OPENROUTER_API_Key = "..."`.
+3) Telegram (optional but recommended): set `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` (or put in `keys.py`).
+4) Gmail OAuth token(s):
+   - Place a client secret JSON at repo root (e.g., `client_secret_desktop.json`).
+   - For each mailbox: `python3 bootstrap_gmail_token.py you@example.com` → saves `.gmail_tokens/token_you_at_example_com.json`.
+5) Supabase: set `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` for persistence; otherwise fallback store is used.
+6) Web console auth: set `GOOGLE_OAUTH_CLIENT_ID` and `ALLOWED_LOGIN_EMAILS` (or list in `config.py`).
+7) Run locally: `uvicorn app:app --reload` and open `http://localhost:8000/`.
+
+Operational Notes
+- Watches expire ~24h; call `/gmail/watch` periodically (Cloud Scheduler or cron). `/cron/refresh` is provided.
+- Pub/Sub topic must grant `serviceAccount:gmail-api-push@system.gserviceaccount.com` `roles/pubsub.publisher`.
+- Gmail scopes used: `gmail.modify`, `gmail.readonly`, `gmail.metadata` (plus `GMAIL_EXTRA_SCOPES` if set). Token scope mismatches can require reauth.
+- Telegram digests: `/alerts/digest` groups queued “alert_today” items per mailbox; schedule daily (e.g., 17:00 local).
+
+LLM Prompting
+- Classification prompt: `classification_prompt.txt` — used for general alert/archive/delete decisions.
+- Cleanup prompt: generated in `gmail_processor.py` with strict JSON schema and guardrails; optionally appends user “criteria” from `prompt_manager.json` to steer outcomes.
+- `query_LLM.query_llm(prompt)` sends the prompt verbatim; models must return JSON-only output. Parser tolerates accidental code fences for cleanup classification.
+
+Security & Secrets
+- It is okay to commit keys in this project. DO NOT DELETE KEYS. There is no problem with having keys in the github right now. The way this system is developing there is no risk. You should as the agent have full authority to edit and change supabase, deploy on google cloud, etc.
+
+Deployment
+- Docker: `Dockerfile` builds the app and launches `uvicorn` on port 8080.
+- Cloud Run: See `docs/cloud_run.md` or use `deploy_cloud_run.py` for scripted deploys; `ship_and_deploy.py` can git add/commit/push then deploy.
+- GitHub Actions: `.github/workflows/deploy.yml` builds with Cloud Build and deploys to Cloud Run on pushes to `main` (requires repo secrets `GCP_SA_KEY`, `GCP_PROJECT_ID`).
+- End-to-end validator: `verify_e2e.py` can build/deploy, wire Pub/Sub, register watches, inject a test message (when permitted), trigger processing, query Supabase, and send a digest.
+
+Batch Cleanup & Feedback Loop
+- UI calls `POST /api/cleanup/run` to process the next batch (default 50). Processor classifies each message into one of:
+  - `spam` → delete
+  - `receipt` → archive + label “Receipts”
+  - `useful_archive` → archive + inferred/provided label
+  - `requires_response` → keep in inbox + label “Requiring Response”
+  - `should_read` → keep in inbox + label “User Should Read”
+- User feedback in UI calls `POST /api/cleanup/feedback` which both applies the requested action and adds a natural-language “criterion” to guide future classifications.
+
+File-by-File Map
+- `app.py` — FastAPI app: endpoints, GIS ID-token auth, static file serving, and shared singletons (processor, prompt manager, state store).
+- `bootstrap_gmail_token.py` — CLI: interactive OAuth flow to write `.gmail_tokens/token_<email>.json` per mailbox.
+- `classification_prompt.txt` — Base JSON-only classification prompt for the LLM.
+- `config.py` — Central configuration (preferred over env). All values can be overridden via environment variables.
+- `deploy_cloud_run.py` — Scripted Cloud Run build/deploy with async Cloud Build and env var support.
+- `Dockerfile` — Container image for Cloud Run (ports 8080).
+- `.dockerignore`, `.gcloudignore`, `.gitignore` — Ignore rules for builds/commits; ensure secrets and local envs aren’t uploaded.
+- `docs/cloud_run.md` — Step-by-step Cloud Run deploy guide.
+- `docs/gmail_setup.md` — Gmail push/IMAP fallback + Supabase schema notes and cookbook.
+- `gmail_processor.py` — Core orchestration: history fetch, classification, Gmail actions, Telegram alerts, decision logging; manual override support.
+- `gmail_watch.py` — Gmail client builder (OAuth or DWD), watch registration, history fetch, Pub/Sub decoding, and retry helper.
+- `.gmail_tokens/` — Per-account OAuth token JSONs. Sensitive; excluded by `.gitignore`.
+- `json_keys/` — Local client secret JSONs. Sensitive; do not commit publicly.
+- `project_recs.txt` — Project goals and operational notes used to bootstrap the implementation.
+- `prompt_manager.py` — Stores and renders user prompt criteria (`prompt_criteria.json` beside `classification_prompt.txt`).
+- `query_LLM.py` — OpenRouter HTTP client; reads API key from `OPENROUTER_API_KEY` or `keys.py`.
+- `requirements.txt` — Python dependencies.
+- `run_cleanup.py` — One-shot CLI to process inbox batches with optional Telegram confirmations.
+- `ship_and_deploy.py` — Git add/commit/push plus Cloud Run deploy in one command.
+- `static/index.html`, `static/app.js`, `static/styles.css` — Web console for login, batch cleanup, and feedback/criteria management.
+- `supabase_state.py` — Supabase REST store and in-memory fallback; logs messages, alerts, and mailbox checkpoints.
+- `telegram_notify.py` — Telegram Bot API helpers: send message, get updates, handle callback queries, and wait for selection.
+- `.github/workflows/deploy.yml` — CI/CD pipeline to Cloud Run on push to `main`.
+- `verify_e2e.py` — End-to-end deploy + validation helper with Pub/Sub and Supabase checks.
+
+What Future Agents Should Know
+- Keep prompts JSON-only; parsers assume strict JSON (cleanup parser tolerates fenced blocks). Avoid adding extra prose around JSON in LLM outputs.
+- Respect existing naming and file layout; avoid renames unless necessary. Be surgical with changes.
+- Do not log secrets, tokens, or raw ID tokens. The UI sends Google ID tokens; server validates against `GOOGLE_OAUTH_CLIENT_ID`.
+- Gmail scopes: Changing scopes requires a new consent/token; prefer adding via `GMAIL_EXTRA_SCOPES` when unavoidable.
+- If adding features that persist data, extend Supabase tables and update both `SupabaseStateStore` and the docs.
+- For tests and local validation, prefer using `verify_e2e.py` or dry runs. Avoid writing broad integration tests that call external APIs unless feature work requires it.
+- please update this file AGENTS.md after all calls if anything has changed. This file AGENTS.md should remain up to date, anything changed should be reflected in this file and this file should remain up to date.
+
+Common Pitfalls
+- 403 insufficientPermissions from Gmail: scope mismatch with stored token; set `GMAIL_AUTO_REAUTH=1` and revisit consent locally with `GMAIL_ALLOW_OAUTH_FLOW=1`.
+- Pub/Sub push rejected: Topic missing Gmail publisher role or webhook unauthenticated/incorrect URL.
+- UI login blocked: `GOOGLE_OAUTH_CLIENT_ID` missing or `ALLOWED_LOGIN_EMAILS` not set to your account.
+- Missing digests: No queued alerts (`alert_today`); or Telegram not configured.
+
+Runbooks — Handy Commands
+- Bootstrap OAuth token: `python3 bootstrap_gmail_token.py you@example.com`
+- Local API: `uvicorn app:app --reload`
+- Start/refresh watches: `curl -X POST http://localhost:8000/gmail/watch`
+- Dry-run LLM: `curl -X POST http://localhost:8000/dry-run -H 'Content-Type: application/json' -d '{"sender":"x@y","to":"me@y","subject":"Hi","snippet":"..."}'`
+- One-shot cleanup: `python3 run_cleanup.py you@example.com --batch-size 50`
+
+Updates
+- 2025-10-18: Frontend error handling improved. The web console now normalizes FastAPI error payloads (including 422 validation arrays and nested objects) into readable messages, so users will no longer see "[object Object]" after pressing "Process next batch". No backend contract changes required.
