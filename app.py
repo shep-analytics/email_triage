@@ -1,17 +1,24 @@
-import json
+from __future__ import annotations
+
 import os
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
-from fastapi import FastAPI, HTTPException, Request
-from pydantic import BaseModel
+from fastapi import Depends, FastAPI, HTTPException, Request, Body
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from google.auth.transport import requests as google_auth_requests
+from google.oauth2 import id_token
+from pydantic import BaseModel, Field
 
-from gmail_processor import GmailProcessor
+from gmail_processor import CleanupCategory, GmailProcessor
 from gmail_watch import GmailAccount, build_gmail_service, start_watch
 try:
     from googleapiclient.errors import HttpError  # type: ignore
 except Exception:  # pragma: no cover
     HttpError = Exception  # fallback type alias
+from prompt_manager import PromptManager
 from supabase_state import BaseStateStore, MailboxState, get_state_store
 from telegram_notify import send_telegram_message
 
@@ -22,9 +29,17 @@ except ImportError:  # pragma: no cover - optional configuration module
 
 try:
     from keys import telegram_chat_id as keys_telegram_chat_id, telegram_token as keys_telegram_token  # type: ignore
+    from keys import SUPABASE_URL as keys_SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY as keys_SUPABASE_SERVICE_ROLE_KEY  # type: ignore
+    try:
+        from keys import GOOGLE_OAUTH_CLIENT_ID as keys_GOOGLE_OAUTH_CLIENT_ID  # type: ignore
+    except Exception:  # pragma: no cover
+        keys_GOOGLE_OAUTH_CLIENT_ID = None  # type: ignore
 except ImportError:  # pragma: no cover - optional keys module
     keys_telegram_chat_id = None  # type: ignore
     keys_telegram_token = None  # type: ignore
+    keys_SUPABASE_URL = None  # type: ignore
+    keys_SUPABASE_SERVICE_ROLE_KEY = None  # type: ignore
+    keys_GOOGLE_OAUTH_CLIENT_ID = None  # type: ignore
 
 
 def _config_value(attr: str, env_name: str, default=None):
@@ -43,6 +58,54 @@ def _configured_mailboxes() -> List[str]:
         return [account.strip() for account in config.GMAIL_ACCOUNTS if account.strip()]  # type: ignore[attr-defined]
     raw = os.getenv("GMAIL_ACCOUNTS", "")
     return [item.strip() for item in raw.split(",") if item.strip()]
+
+
+def _allowed_login_emails() -> List[str]:
+    if config and getattr(config, "ALLOWED_LOGIN_EMAILS", None):
+        return [addr.strip().lower() for addr in config.ALLOWED_LOGIN_EMAILS if addr.strip()]  # type: ignore[attr-defined]
+    raw = os.getenv("ALLOWED_LOGIN_EMAILS", "")
+    items = [item.strip().lower() for item in raw.split(",") if item.strip()]
+    if items:
+        return items
+    fallback = [acct.lower() for acct in _configured_mailboxes()]
+    if fallback:
+        return fallback
+    return ["alexsheppert@gmail.com"]
+
+
+def _cleanup_action_description(category: CleanupCategory, label: Optional[str]) -> str:
+    if category == "spam":
+        return "delete them as spam."
+    if category == "receipt":
+        return "treat them as receipts and archive them."
+    if category == "useful_archive":
+        label_name = label or "Filed"
+        return f"archive them with the '{label_name}' label."
+    if category == "requires_response":
+        return "leave them in the inbox under the 'Requiring Response' label."
+    if category == "should_read":
+        return "leave them in the inbox under the 'User Should Read' label."
+    return "apply the specified cleanup action."
+
+
+def _build_criterion_text(
+    *,
+    subject: str,
+    sender: str,
+    category: CleanupCategory,
+    label: Optional[str],
+    comment: str,
+) -> str:
+    subject_text = subject.strip() or "(no subject)"
+    sender_text = sender.strip() or "unknown sender"
+    reason = comment.strip().replace("\n", " ")
+    action_sentence = _cleanup_action_description(category, label)
+    base = f"For emails similar to '{subject_text}' from {sender_text}, {action_sentence}"
+    if reason:
+        if not reason.endswith("."):
+            reason += "."
+        return f"{base} Reason: {reason}"
+    return base
 
 
 def _classification_prompt_path() -> Path:
@@ -105,19 +168,55 @@ telegram_token = _telegram_value("TELEGRAM_BOT_TOKEN", keys_telegram_token, "TEL
 telegram_chat_id = _telegram_value("TELEGRAM_CHAT_ID", keys_telegram_chat_id, "TELEGRAM_CHAT_ID")
 
 state_store: BaseStateStore = get_state_store(
-    url=_config_value("SUPABASE_URL", "SUPABASE_URL"),
-    service_role_key=_config_value("SUPABASE_SERVICE_ROLE_KEY", "SUPABASE_SERVICE_ROLE_KEY"),
+    url=_config_value("SUPABASE_URL", "SUPABASE_URL") or keys_SUPABASE_URL,
+    service_role_key=_config_value("SUPABASE_SERVICE_ROLE_KEY", "SUPABASE_SERVICE_ROLE_KEY") or keys_SUPABASE_SERVICE_ROLE_KEY,
 )
+classification_prompt_path = _classification_prompt_path()
+prompt_manager = PromptManager(classification_prompt_path)
+google_client_id = _config_value("GOOGLE_OAUTH_CLIENT_ID", "GOOGLE_OAUTH_CLIENT_ID") or keys_GOOGLE_OAUTH_CLIENT_ID
+allowed_login_emails = {email.lower() for email in _allowed_login_emails()}
+auth_scheme = HTTPBearer(auto_error=False)
+_google_request_session = google_auth_requests.Request()
 processor = GmailProcessor(
     gmail_service_factory=gmail_service_factory,
     state_store=state_store,
-    classification_prompt_path=_classification_prompt_path(),
+    classification_prompt_path=classification_prompt_path,
+    prompt_manager=prompt_manager,
     telegram_token=telegram_token,
     telegram_chat_id=telegram_chat_id,
 )
 
 app = FastAPI()
+static_dir = Path(__file__).parent / "static"
+if static_dir.exists():
+    app.mount("/static", StaticFiles(directory=static_dir), name="static")
 
+
+def _authenticate(credentials: Optional[HTTPAuthorizationCredentials]) -> Dict[str, Any]:
+    if credentials is None or not credentials.credentials:
+        raise HTTPException(status_code=401, detail="Authentication required.")
+    if not google_client_id:
+        raise HTTPException(status_code=500, detail="GOOGLE_OAUTH_CLIENT_ID is not configured.")
+    token = credentials.credentials
+    try:
+        id_info = id_token.verify_oauth2_token(token, _google_request_session, google_client_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=401, detail=f"Invalid ID token: {exc}") from exc
+    email = str(id_info.get("email", "")).lower()
+    if email not in allowed_login_emails:
+        raise HTTPException(status_code=403, detail="Email not authorized.")
+    return {"email": email, "claims": id_info}
+
+
+def get_current_user(credentials: Optional[HTTPAuthorizationCredentials] = Depends(auth_scheme)) -> Dict[str, Any]:
+    return _authenticate(credentials)
+
+
+# ---------------------------------------------------------------------------
+# Request/response models (Pydantic)
+# Define these before route declarations so FastAPI correctly treats them
+# as request bodies instead of query params.
+# ---------------------------------------------------------------------------
 
 class DryRunPayload(BaseModel):
     sender: str
@@ -133,6 +232,132 @@ class CleanupRequest(BaseModel):
     await_user_confirmation: bool = True
     telegram_token: Optional[str] = None
     telegram_chat_id: Optional[str] = None
+
+
+class CleanupRunRequest(BaseModel):
+    mailbox_email: Optional[str] = None
+    batch_size: int = 50
+
+
+class FeedbackRequest(BaseModel):
+    mailbox_email: Optional[str] = None
+    gmail_id: str
+    desired_category: CleanupCategory
+    label: Optional[str] = None
+    comment: str = Field(default="", max_length=500)
+
+
+class CriterionPayload(BaseModel):
+    text: str = Field(min_length=1, max_length=500)
+
+
+class CriterionUpdatePayload(BaseModel):
+    text: Optional[str] = Field(default=None, min_length=1, max_length=500)
+    enabled: Optional[bool] = None
+
+
+@app.get("/")
+async def serve_root():
+    if not static_dir.exists():
+        raise HTTPException(status_code=404, detail="Web UI not available.")
+    return FileResponse(static_dir / "index.html")
+
+
+@app.get("/api/config")
+async def api_config():
+    return {
+        "google_client_id": google_client_id,
+        "allowed_emails": sorted(allowed_login_emails),
+        "criteria_count": len(prompt_manager.list_criteria()),
+    }
+
+
+@app.post("/api/cleanup/run")
+async def api_cleanup_run(payload: CleanupRunRequest = Body(...), user=Depends(get_current_user)):
+    batch_size = payload.batch_size or 50
+    if batch_size <= 0 or batch_size > 500:
+        raise HTTPException(status_code=400, detail="batch_size must be between 1 and 500.")
+    mailbox = (payload.mailbox_email or user["email"]).strip()
+    if not mailbox:
+        raise HTTPException(status_code=400, detail="mailbox_email is required.")
+    result = processor.clear_inbox(
+        mailbox,
+        batch_size=batch_size,
+        await_user_confirmation=False,
+    )
+    return result
+
+
+@app.post("/api/cleanup/feedback")
+async def api_cleanup_feedback(payload: FeedbackRequest = Body(...), user=Depends(get_current_user)):
+    mailbox = (payload.mailbox_email or user["email"]).strip()
+    if not mailbox:
+        raise HTTPException(status_code=400, detail="mailbox_email is required.")
+    comment = payload.comment.strip()
+    try:
+        override_result = processor.apply_manual_cleanup_decision(
+            email_address=mailbox,
+            gmail_id=payload.gmail_id,
+            category=payload.desired_category,
+            label=payload.label,
+        )
+    except Exception as exc:  # noqa: BLE001 - bubble as HTTP error
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    headers = override_result.get("headers", {})
+    subject = str(headers.get("subject", "(no subject)"))
+    sender = str(headers.get("from", ""))
+    criterion_text = _build_criterion_text(
+        subject=subject,
+        sender=sender,
+        category=payload.desired_category,
+        label=override_result.get("label") or payload.label,
+        comment=comment,
+    )
+    metadata = {
+        "gmail_id": payload.gmail_id,
+        "mailbox_email": mailbox,
+        "category": payload.desired_category,
+        "label": override_result.get("label") or payload.label,
+        "comment": comment,
+    }
+    criterion = prompt_manager.add_criterion(criterion_text, metadata=metadata)
+    return {
+        "status": "ok",
+        "action": override_result,
+        "criterion": criterion.to_dict(),
+    }
+
+
+@app.get("/api/criteria")
+async def list_criteria(user=Depends(get_current_user)):
+    items = [item.to_dict() for item in prompt_manager.list_criteria()]
+    return {"items": items}
+
+
+@app.post("/api/criteria")
+async def create_criterion(payload: CriterionPayload = Body(...), user=Depends(get_current_user)):
+    criterion = prompt_manager.add_criterion(payload.text.strip())
+    return {"item": criterion.to_dict()}
+
+
+@app.patch("/api/criteria/{criterion_id}")
+async def update_criterion(criterion_id: str, payload: CriterionUpdatePayload = Body(...), user=Depends(get_current_user)):
+    updated = None
+    if payload.text is not None:
+        updated = prompt_manager.update_criterion(criterion_id, payload.text)
+    if payload.enabled is not None:
+        updated = prompt_manager.toggle_criterion(criterion_id, enabled=payload.enabled)
+    if updated is None:
+        updated = prompt_manager.get_criterion(criterion_id)
+    return {"item": updated.to_dict()}
+
+
+@app.delete("/api/criteria/{criterion_id}")
+async def delete_criterion(criterion_id: str, user=Depends(get_current_user)):
+    prompt_manager.delete_criterion(criterion_id)
+    return {"status": "deleted"}
+
 
 
 @app.post("/gmail/push")
