@@ -214,6 +214,7 @@ Updates
   - Inlined SVG favicon to eliminate `/favicon.ico` 404.
 - 2025-10-18: E2E verify/deploy. Ran `verify_e2e.py` which rebuilt/deployed to Cloud Run, ensured Pub/Sub topic + push subscription, refreshed Gmail watches, and installed Cloud Scheduler jobs. Current resolved service URL: `https://email-triage-rq4d232cbq-uc.a.run.app` (the previous regional URL also routes). Push subscription `email-triage-push` now targets `<RUN_URL>/gmail/push`.
 - 2025-10-18: Email viewer + replies. Added UI to browse Inbox/Requires Response/Should Read, view full message text, reply inline, and archive/delete. New API endpoints under `/api/messages/*`. Gmail scope `gmail.send` added; tokens may need reauth if previously minted without it.
+- 2025-10-18: Deployed viewer/reply changes to Cloud Run via verify script; push subscription updated to new service URL. E2E passed.
 
 Behavioral Notes
 - UI batch runs: one batch only, no Telegram. Call again to process the next batch.
