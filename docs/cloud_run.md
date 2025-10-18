@@ -53,7 +53,7 @@ If you prefer explicit `gcloud` commands:
 ```bash
 PROJECT_ID=$(gcloud config get-value project)
 IMAGE="gcr.io/${PROJECT_ID}/email-triage"
-gcloud builds submit --tag "${IMAGE}"
+gcloud builds submit --suppress-logs --tag "${IMAGE}"
 
 REGION="us-central1"
 SERVICE="email-triage"
@@ -63,6 +63,8 @@ gcloud run deploy "${SERVICE}" \
   --allow-unauthenticated
 ```
 Add `--update-env-vars` if you need runtime overrides or `--update-secrets` when reading from Secret Manager. Cloud Run will print the base URL (e.g. `https://email-triage-xyz-uc.a.run.app`).
+
+Tip: If your organization uses VPC Service Controls or you see an error about streaming Cloud Build logs to the default logs bucket, include `--suppress-logs` (as shown) to avoid streaming logs while still waiting for the build to complete.
 
 ## 5. Pub/Sub push subscription
 Create or update the push subscription to target the Cloud Run URL:

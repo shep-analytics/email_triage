@@ -114,6 +114,7 @@ def main() -> int:
                     "gcloud",
                     "builds",
                     "submit",
+                    "--suppress-logs",
                     "--tag",
                     image,
                 ]
