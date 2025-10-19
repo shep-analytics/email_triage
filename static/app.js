@@ -3,6 +3,13 @@ const state = {
   user: null,
   config: null,
   criteria: [],
+  viewer: {
+    label: null,
+    nextPageToken: null,
+    loading: false,
+    pageSize: 10,
+    loadedCount: 0,
+  },
 };
 
 const CATEGORY_LABELS = {
@@ -39,6 +46,8 @@ const viewerList = document.getElementById("viewer-list");
 const loadInboxBtn = document.getElementById("load-inbox");
 const loadRequiresBtn = document.getElementById("load-requires");
 const loadShouldBtn = document.getElementById("load-should");
+const loadMoreBtn = document.getElementById("viewer-load-more");
+const loadMoreRow = document.getElementById("viewer-load-more-row");
 
 document.addEventListener("DOMContentLoaded", () => {
   init().catch((error) => {
@@ -114,6 +123,7 @@ function setupEventHandlers() {
   if (loadInboxBtn) loadInboxBtn.addEventListener("click", () => loadViewer("inbox"));
   if (loadRequiresBtn) loadRequiresBtn.addEventListener("click", () => loadViewer("requires_response"));
   if (loadShouldBtn) loadShouldBtn.addEventListener("click", () => loadViewer("should_read"));
+  if (loadMoreBtn) loadMoreBtn.addEventListener("click", () => loadViewerNextPage());
 }
 
 function initGoogleSignIn() {
@@ -690,27 +700,62 @@ async function loadViewer(label) {
     setStatus(viewerStatus, "Sign in first.", true);
     return;
   }
-  try {
-    setStatus(viewerStatus, `Loading ${label.replace("_", " ")}...`, false);
-    viewerList.innerHTML = "";
-    const data = await apiFetch(`/api/messages?label=${encodeURIComponent(label)}&max_results=50`);
-    renderViewer(data.items || []);
-    setStatus(viewerStatus, `Loaded ${data.items?.length || 0} messages.`, false);
-  } catch (error) {
-    setStatus(viewerStatus, error.message, true);
+  resetViewer(label);
+  await loadViewerNextPage();
+}
+
+function resetViewer(label) {
+  state.viewer.label = label;
+  state.viewer.nextPageToken = null;
+  state.viewer.loading = false;
+  state.viewer.loadedCount = 0;
+  viewerList.innerHTML = "";
+  if (loadMoreBtn) {
+    loadMoreBtn.classList.add("hidden");
+    loadMoreBtn.disabled = false;
   }
 }
 
-function renderViewer(items) {
-  viewerList.innerHTML = "";
-  if (!items.length) {
-    const empty = document.createElement("p");
-    empty.textContent = "No messages found.";
-    empty.className = "message-empty";
-    viewerList.appendChild(empty);
-    return;
+async function loadViewerNextPage() {
+  if (!state.viewer.label || state.viewer.loading) return;
+  try {
+    state.viewer.loading = true;
+    const labelText = state.viewer.label.replace("_", " ");
+    setStatus(viewerStatus, `Loading ${labelText}…`, false);
+    const params = new URLSearchParams({
+      label: state.viewer.label,
+      max_results: String(state.viewer.pageSize),
+    });
+    if (state.viewer.nextPageToken) params.set("page_token", state.viewer.nextPageToken);
+    const data = await apiFetch(`/api/messages?${params.toString()}`);
+    const items = data.items || [];
+    if (!items.length && state.viewer.loadedCount === 0) {
+      const empty = document.createElement("p");
+      empty.textContent = "No messages found.";
+      empty.className = "message-empty";
+      viewerList.appendChild(empty);
+    } else {
+      items.forEach((item) => viewerList.appendChild(buildViewerCard(item)));
+      state.viewer.loadedCount += items.length;
+    }
+    // Update next page token and button visibility
+    state.viewer.nextPageToken = data.next_page_token || null;
+    if (loadMoreBtn) {
+      if (state.viewer.nextPageToken) {
+        loadMoreBtn.classList.remove("hidden");
+        loadMoreBtn.disabled = false;
+      } else {
+        loadMoreBtn.classList.add("hidden");
+      }
+    }
+    const more = state.viewer.nextPageToken ? " (more available)" : "";
+    setStatus(viewerStatus, `Loaded ${state.viewer.loadedCount} message(s)${more}.`, false);
+  } catch (error) {
+    setStatus(viewerStatus, error.message, true);
+    if (loadMoreBtn) loadMoreBtn.disabled = false;
+  } finally {
+    state.viewer.loading = false;
   }
-  items.forEach((item) => viewerList.appendChild(buildViewerCard(item)));
 }
 
 function buildViewerCard(item) {
@@ -727,6 +772,26 @@ function buildViewerCard(item) {
       <button class="archive-btn secondary">Archive</button>
       <button class="delete-btn danger">Delete</button>
     </div>
+    <div class="message-actions">
+      <label>
+        Desired action
+        <select class="action-select">
+          ${buildActionOptions()}
+        </select>
+      </label>
+      <label class="label-input">
+        Label name
+        <input type="text" class="label-value" value="Filed" />
+      </label>
+      <label>
+        Comment to add to prompt
+        <textarea class="comment-input" rows="2" placeholder="Why should this be treated differently?"></textarea>
+      </label>
+    </div>
+    <div class="actions-row">
+      <button class="apply-feedback">Apply feedback</button>
+    </div>
+    <div class="feedback-status"></div>
     <div class="viewer-body hidden"></div>
     <div class="reply-box hidden">
       <label>
@@ -750,6 +815,11 @@ function buildViewerCard(item) {
   const cancelReplyBtn = card.querySelector(".cancel-reply");
   const replyText = card.querySelector(".reply-text");
   const replyStatus = card.querySelector(".reply-status");
+  const actionSelect = card.querySelector(".action-select");
+  const labelWrapper = card.querySelector(".label-input");
+  const labelInput = card.querySelector(".label-value");
+  const applyButton = card.querySelector(".apply-feedback");
+  const feedbackStatus = card.querySelector(".feedback-status");
 
   let loaded = false;
   viewBtn.addEventListener("click", async () => {
@@ -812,7 +882,6 @@ function buildViewerCard(item) {
   });
 
   archiveBtn.addEventListener("click", async () => {
-    if (!window.confirm("Archive this message?")) return;
     try {
       archiveBtn.disabled = true;
       await apiFetch(`/api/messages/${encodeURIComponent(card.dataset.gmailId)}/archive`, {
@@ -822,11 +891,10 @@ function buildViewerCard(item) {
       card.remove();
     } catch (error) {
       archiveBtn.disabled = false;
-      alert(error.message);
+      setStatus(viewerStatus, error.message, true);
     }
   });
   deleteBtn.addEventListener("click", async () => {
-    if (!window.confirm("Delete this message? This cannot be undone.")) return;
     try {
       deleteBtn.disabled = true;
       await apiFetch(`/api/messages/${encodeURIComponent(card.dataset.gmailId)}/delete`, {
@@ -836,7 +904,44 @@ function buildViewerCard(item) {
       card.remove();
     } catch (error) {
       deleteBtn.disabled = false;
-      alert(error.message);
+      setStatus(viewerStatus, error.message, true);
+    }
+  });
+
+  actionSelect.addEventListener("change", () => {
+    if (ACTIONS_REQUIRING_LABEL.has(actionSelect.value)) {
+      labelWrapper.classList.add("visible");
+    } else {
+      labelWrapper.classList.remove("visible");
+    }
+  });
+  actionSelect.dispatchEvent(new Event("change"));
+  applyButton.addEventListener("click", async () => {
+    try {
+      applyButton.disabled = true;
+      feedbackStatus.textContent = "Submitting feedback...";
+      feedbackStatus.classList.remove("error");
+      const payload = {
+        gmail_id: card.dataset.gmailId,
+        desired_category: actionSelect.value,
+        label: ACTIONS_REQUIRING_LABEL.has(actionSelect.value) ? labelInput.value.trim() || "Filed" : null,
+        comment: card.querySelector(".comment-input").value.trim(),
+      };
+      await apiFetch("/api/cleanup/feedback", {
+        method: "POST",
+        body: JSON.stringify(payload),
+      });
+      feedbackStatus.textContent = "Feedback applied and prompt updated.";
+      labelWrapper.classList.remove("visible");
+      setTimeout(() => {
+        feedbackStatus.textContent = "";
+        applyButton.disabled = false;
+      }, 1200);
+      await loadCriteria();
+    } catch (error) {
+      feedbackStatus.textContent = error.message;
+      feedbackStatus.classList.add("error");
+      applyButton.disabled = false;
     }
   });
 

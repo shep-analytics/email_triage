@@ -619,7 +619,27 @@ async def list_messages(
     if page_token:
         kwargs["pageToken"] = page_token
 
-    response = service.users().messages().list(**kwargs).execute()
+    try:
+        response = service.users().messages().list(**kwargs).execute()
+    except HttpError as he:  # type: ignore
+        # Provide clearer error details for common permission/scope issues
+        status = getattr(getattr(he, "resp", None), "status", 500)
+        raw = getattr(he, "content", b"")
+        try:
+            detail = raw.decode("utf-8") if isinstance(raw, (bytes, bytearray)) else str(raw)
+        except Exception:
+            detail = str(he)
+        msg = detail or str(he)
+        if status == 403 or "insufficientPermissions" in msg or "insufficient authentication scopes" in msg:
+            raise HTTPException(
+                status_code=403,
+                detail=(
+                    "Gmail permission error. Token may lack required scopes or be invalid. "
+                    "If using OAuth tokens, re-consent locally with GMAIL_AUTO_REAUTH=1 and GMAIL_ALLOW_OAUTH_FLOW=1. "
+                    "If using domain-wide delegation, verify delegated user and scopes. Details: " + msg
+                ),
+            )
+        raise HTTPException(status_code=500, detail=f"Failed to list messages: {msg}")
     items: List[Dict[str, Any]] = []
     for msg in response.get("messages", []) or []:
         mid = msg.get("id")
