@@ -223,6 +223,9 @@ Updates
   - API now returns 403 with guidance for `invalid_scope`/`insufficientPermissions` instead of 500s across viewer/reply/archive/delete.
   - Files touched: `static/app.js`, `static/index.html`, `app.py`.
   - Deployed via `verify_e2e.py`; Cloud Run updated and Pub/Sub push verified.
+- 2025-10-19: Custom domain. Mapped `inboximp.com` (apex) and `www.inboximp.com` to Cloud Run service `email-triage` in `us-central1`. DNS in Namecheap uses four A records for apex and `CNAME www -> ghs.googlehosted.com`. Certificate provisioning may take ~15 minutes after DNS propagation. Optional AAAA records for IPv6: `2001:4860:4802:32::15`, `:34::15`, `:36::15`, `:38::15`.
+- 2025-10-19: Pub/Sub push endpoint updated to custom domain. Subscription `email-triage-push` now pushes to `https://inboximp.com/gmail/push`. Previous service URL remains valid as a fallback.
+- 2025-10-19: E2E script enhancement. `verify_e2e.py` now accepts `--push-endpoint` to avoid resetting Pub/Sub to the default Cloud Run URL when using a custom domain. Example: `python3 verify_e2e.py --key-file json_keys/owner_google_service_account_key.json --region us-central1 --service email-triage --subscription email-triage-push --email <acct> --skip-deploy --push-endpoint https://inboximp.com/gmail/push`.
 
 Behavioral Notes
 - UI batch runs: one batch only, no Telegram. Call again to process the next batch.

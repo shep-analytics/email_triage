@@ -24,7 +24,8 @@ Usage:
     --region us-central1 \
     --service email-triage \
     --subscription email-triage-push \
-    --email alexsheppert@gmail.com
+    --email alexsheppert@gmail.com \
+    [--push-endpoint https://inboximp.com/gmail/push]
 
 Notes:
  - If Gmail API insert lacks permission, the script will skip message injection
@@ -488,6 +489,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--scheduler-timezone", default="UTC", help="Cloud Scheduler time zone")
     parser.add_argument("--refresh-cron", default="every 12 hours", help="Watch refresh schedule")
     parser.add_argument("--digest-cron", default="0 17 * * *", help="Daily digest cron expression")
+    parser.add_argument("--push-endpoint", default=None, help="Override Pub/Sub push endpoint (e.g., https://inboximp.com/gmail/push)")
     return parser.parse_args()
 
 
@@ -529,7 +531,8 @@ def main() -> int:
         print("GMAIL_TOPIC_NAME is not set in config.py", file=sys.stderr)
         return 1
 
-    if not ensure_pubsub(topic, args.subscription, base_url.rstrip("/") + "/gmail/push"):
+    push_endpoint = args.push_endpoint or (base_url.rstrip("/") + "/gmail/push")
+    if not ensure_pubsub(topic, args.subscription, push_endpoint):
         return 1
 
     # Health check and watch
