@@ -11,9 +11,11 @@
 2. **OAuth consent screen**: configure External (for personal Gmail) or Internal (workspace). Add Gmail scopes:
    - `https://www.googleapis.com/auth/gmail.modify`
    - `https://www.googleapis.com/auth/gmail.readonly` (optional but useful for dry-runs)
+   - `https://www.googleapis.com/auth/gmail.metadata`
+   - Optional (only if you plan to use the Reply feature): `https://www.googleapis.com/auth/gmail.send`
 3. **Credentials**:
    - For personal accounts, create an OAuth client (`Desktop` or `Web` app). Save `client_secret.json`.
-   - For Google Workspace, you may instead create a service account and enable domain-wide delegation. Remember to authorize the Gmail scopes in the Admin console and specify the user email when calling `build_gmail_service(..., delegated_user="user@domain.com")`.
+   - For Google Workspace, you may instead create a service account and enable domain-wide delegation. Remember to authorize the Gmail scopes in the Admin console and specify the user email when calling `build_gmail_service(..., delegated_user="user@domain.com")`. If using the Reply feature, also authorize `gmail.send` for the service account.
 4. **Pub/Sub topic**: `projects/<project-id>/topics/email-triage`. Grant `serviceAccount:gmail-api-push@system.gserviceaccount.com` the `Pub/Sub Publisher` role on the topic.
 5. **Pub/Sub subscription**:
    - Use push delivery to your webhook (`https://your-domain.example.com/gmail/push`).
