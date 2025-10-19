@@ -217,6 +217,10 @@ Updates
 - 2025-10-18: Email viewer + replies. Added UI to browse Inbox/Requires Response/Should Read, view full message text, reply inline, and archive/delete. New API endpoints under `/api/messages/*`. Gmail scope `gmail.send` added; tokens may need reauth if previously minted without it.
 - 2025-10-18: Deployed viewer/reply changes to Cloud Run via verify script; push subscription updated to new service URL. E2E passed.
 - 2025-10-19: Viewer UX unified + pagination. The email viewer now includes the same per‑email feedback controls as cleanup (Desired action, optional label, and comment) on every message card. Archive/Delete no longer prompt; actions apply immediately and remove the card. Viewer loads 10 messages at a time with a Load more button (prevents overload). Frontend always sends the Google ID token on these calls. Backend `/api/messages` adds clearer errors for Gmail scope/permission issues (403 with guidance) instead of opaque 500s.
+- 2025-10-19: Gmail scopes — safer defaults. The default Gmail scope set no longer includes `gmail.send`. Read/list/modify paths (`/api/messages`, cleanup, watch, archive/delete) use `gmail.modify`, `gmail.readonly`, and `gmail.metadata` only. The reply endpoint (`/api/messages/{id}/reply`) now requests `gmail.send` explicitly. This avoids `invalid_scope` errors for service accounts that have not been authorized for send. If you use replies, ensure:
+  - OAuth tokens are re-consented to include `gmail.send` (set `GMAIL_AUTO_REAUTH=1` and `GMAIL_ALLOW_OAUTH_FLOW=1` locally, then redeploy tokens), or
+  - For Domain‑Wide Delegation, authorize the service account for `https://www.googleapis.com/auth/gmail.send` in Admin Console.
+  - API now returns 403 with guidance for `invalid_scope`/`insufficientPermissions` instead of 500s across viewer/reply/archive/delete.
   - Files touched: `static/app.js`, `static/index.html`, `app.py`.
   - Deployed via `verify_e2e.py`; Cloud Run updated and Pub/Sub push verified.
 

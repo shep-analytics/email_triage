@@ -18,7 +18,13 @@ from google.oauth2 import id_token
 from pydantic import BaseModel, Field
 
 from gmail_processor import CleanupCategory, GmailProcessor
-from gmail_watch import GmailAccount, build_gmail_service, start_watch
+from gmail_watch import (
+    GmailAccount,
+    build_gmail_service,
+    start_watch,
+    GMAIL_READ_SCOPES,
+    GMAIL_SEND_SCOPES,
+)
 try:
     from googleapiclient.errors import HttpError  # type: ignore
 except Exception:  # pragma: no cover
@@ -145,15 +151,17 @@ def _true(value: Optional[str]) -> bool:
     return str(value).strip().lower() in {"1", "true", "yes", "on"}
 
 
-def gmail_service_factory(email: str):
+def gmail_service_factory(email: str, *, scopes=None):
     service_account_file = _config_value("GMAIL_SERVICE_ACCOUNT_FILE", "GMAIL_SERVICE_ACCOUNT_FILE")
     delegated_user = _config_value("GMAIL_DELEGATED_USER", "GMAIL_DELEGATED_USER", email)
     oauth_client_secret = _config_value("GMAIL_CLIENT_SECRET_PATH", "GMAIL_OAUTH_CLIENT_SECRET")
+    scopes = scopes or GMAIL_READ_SCOPES
 
     if service_account_file:
         return build_gmail_service(
             service_account_file=service_account_file,
             delegated_user=delegated_user,
+            scopes=scopes,
         )
     if not oauth_client_secret:
         raise RuntimeError(
@@ -166,6 +174,7 @@ def gmail_service_factory(email: str):
         oauth_client_secret=oauth_client_secret,
         oauth_token_file=str(token_file),
         allow_oauth_flow=allow_flow,
+        scopes=scopes,
     )
 
 
@@ -630,7 +639,13 @@ async def list_messages(
         except Exception:
             detail = str(he)
         msg = detail or str(he)
-        if status == 403 or "insufficientPermissions" in msg or "insufficient authentication scopes" in msg:
+        if (
+            status == 403
+            or "insufficientPermissions" in msg
+            or "insufficient authentication scopes" in msg
+            or "invalid_scope" in msg
+            or "unauthorized_client" in msg
+        ):
             raise HTTPException(
                 status_code=403,
                 detail=(
@@ -692,8 +707,29 @@ async def get_message(gmail_id: str, mailbox_email: Optional[str] = None, user=D
             .get(userId=mailbox, id=gmail_id, format="full")
             .execute()
         )
-    except Exception as exc:  # pragma: no cover - external
-        raise HTTPException(status_code=500, detail=str(exc))
+    except HttpError as he:  # type: ignore
+        status = getattr(getattr(he, "resp", None), "status", 500)
+        raw = getattr(he, "content", b"")
+        try:
+            detail = raw.decode("utf-8") if isinstance(raw, (bytes, bytearray)) else str(raw)
+        except Exception:
+            detail = str(he)
+        msg = detail or str(he)
+        if (
+            status == 403
+            or "insufficientPermissions" in msg
+            or "insufficient authentication scopes" in msg
+            or "invalid_scope" in msg
+            or "unauthorized_client" in msg
+        ):
+            raise HTTPException(
+                status_code=403,
+                detail=(
+                    "Gmail permission error. Token may lack required scopes or be invalid. "
+                    "Re-consent locally or update domain-wide delegation scopes. Details: " + msg
+                ),
+            )
+        raise HTTPException(status_code=500, detail=f"Failed to fetch message: {msg}")
     headers = _extract_headers_from_metadata(message)
     text_body, html_body = _extract_bodies(message.get("payload", {}))
     return {
@@ -759,9 +795,32 @@ async def reply_message(gmail_id: str, payload: ReplyPayload = Body(...), user=D
     if thread_id:
         body["threadId"] = thread_id
     try:
-        sent = service.users().messages().send(userId=mailbox, body=body).execute()
-    except Exception as exc:  # pragma: no cover
-        raise HTTPException(status_code=500, detail=str(exc))
+        # Send requires the gmail.send scope
+        send_service = gmail_service_factory(mailbox, scopes=GMAIL_SEND_SCOPES)
+        sent = send_service.users().messages().send(userId=mailbox, body=body).execute()
+    except HttpError as he:  # type: ignore
+        status = getattr(getattr(he, "resp", None), "status", 500)
+        raw = getattr(he, "content", b"")
+        try:
+            detail = raw.decode("utf-8") if isinstance(raw, (bytes, bytearray)) else str(raw)
+        except Exception:
+            detail = str(he)
+        msg = detail or str(he)
+        if (
+            status == 403
+            or "insufficientPermissions" in msg
+            or "insufficient authentication scopes" in msg
+            or "invalid_scope" in msg
+            or "unauthorized_client" in msg
+        ):
+            raise HTTPException(
+                status_code=403,
+                detail=(
+                    "Gmail send permission missing. Enable gmail.send for the token (re-consent) "
+                    "or authorize the service account for gmail.send in Admin Console. Details: " + msg
+                ),
+            )
+        raise HTTPException(status_code=500, detail=f"Failed to send reply: {msg}")
     return {"status": "sent", "id": sent.get("id"), "thread_id": sent.get("threadId")}
 
 
@@ -777,8 +836,23 @@ async def archive_message(gmail_id: str, payload: MailboxPayload = Body(...), us
             id=gmail_id,
             body={"removeLabelIds": ["INBOX"], "addLabelIds": []},
         ).execute()
-    except Exception as exc:  # pragma: no cover
-        raise HTTPException(status_code=500, detail=str(exc))
+    except HttpError as he:  # type: ignore
+        status = getattr(getattr(he, "resp", None), "status", 500)
+        raw = getattr(he, "content", b"")
+        try:
+            detail = raw.decode("utf-8") if isinstance(raw, (bytes, bytearray)) else str(raw)
+        except Exception:
+            detail = str(he)
+        msg = detail or str(he)
+        if (
+            status == 403
+            or "insufficientPermissions" in msg
+            or "insufficient authentication scopes" in msg
+            or "invalid_scope" in msg
+            or "unauthorized_client" in msg
+        ):
+            raise HTTPException(status_code=403, detail="Gmail modify permission missing or token invalid. " + msg)
+        raise HTTPException(status_code=500, detail=f"Failed to archive: {msg}")
     return {"status": "archived", "gmail_id": gmail_id}
 
 
@@ -790,8 +864,23 @@ async def delete_message(gmail_id: str, payload: MailboxPayload = Body(...), use
     service = gmail_service_factory(mailbox)
     try:
         service.users().messages().delete(userId=mailbox, id=gmail_id).execute()
-    except Exception as exc:  # pragma: no cover
-        raise HTTPException(status_code=500, detail=str(exc))
+    except HttpError as he:  # type: ignore
+        status = getattr(getattr(he, "resp", None), "status", 500)
+        raw = getattr(he, "content", b"")
+        try:
+            detail = raw.decode("utf-8") if isinstance(raw, (bytes, bytearray)) else str(raw)
+        except Exception:
+            detail = str(he)
+        msg = detail or str(he)
+        if (
+            status == 403
+            or "insufficientPermissions" in msg
+            or "insufficient authentication scopes" in msg
+            or "invalid_scope" in msg
+            or "unauthorized_client" in msg
+        ):
+            raise HTTPException(status_code=403, detail="Gmail delete permission missing or token invalid. " + msg)
+        raise HTTPException(status_code=500, detail=f"Failed to delete: {msg}")
     return {"status": "deleted", "gmail_id": gmail_id}
 
 

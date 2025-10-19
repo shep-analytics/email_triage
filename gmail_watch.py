@@ -19,16 +19,22 @@ from google.oauth2.credentials import Credentials
 from google.oauth2.service_account import Credentials as ServiceAccountCredentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 
-GMAIL_SCOPES = [
+# Scope sets
+# - Default read/modify set used for most operations (list, labels, archive/delete)
+GMAIL_READ_SCOPES = [
     # Modify includes read access, but we also declare readonly explicitly
     # to avoid scope-mismatch surprises with previously-minted tokens.
     "https://www.googleapis.com/auth/gmail.modify",
     "https://www.googleapis.com/auth/gmail.readonly",
     # Be explicit about metadata access to avoid any provider quirks
     "https://www.googleapis.com/auth/gmail.metadata",
-    # Enable sending replies from the web UI
-    "https://www.googleapis.com/auth/gmail.send",
 ]
+
+# - Send scope is requested only where needed (reply endpoint)
+GMAIL_SEND_SCOPE = "https://www.googleapis.com/auth/gmail.send"
+
+# Convenience union for callers that need send + read/modify
+GMAIL_SEND_SCOPES = [*GMAIL_READ_SCOPES, GMAIL_SEND_SCOPE]
 
 
 @dataclass
@@ -50,7 +56,7 @@ def build_gmail_service(
     delegated_user: Optional[str] = None,
     oauth_client_secret: Optional[str] = None,
     oauth_token_file: Optional[str] = None,
-    scopes: Iterable[str] = GMAIL_SCOPES,
+    scopes: Iterable[str] = GMAIL_READ_SCOPES,
     allow_oauth_flow: bool = True,
 ):
     """
