@@ -82,6 +82,16 @@ class BaseStateStore:
     def delete_message_summary(self, *, gmail_id: str, mailbox_email: str) -> None:
         raise NotImplementedError
 
+    # --- OAuth token storage (optional) -----------------------------------
+
+    def get_gmail_token(self, *, email: str) -> Optional[str]:
+        """Return serialized OAuth credential JSON for the mailbox, if stored."""
+        return None
+
+    def upsert_gmail_token(self, *, email: str, token_json: str) -> None:
+        """Persist or replace serialized OAuth credential JSON for the mailbox."""
+        return None
+
 
 class SupabaseStateStore(BaseStateStore):
     """
@@ -314,6 +324,51 @@ class SupabaseStateStore(BaseStateStore):
         )
         response.raise_for_status()
 
+    # --- OAuth token storage ----------------------------------------------
+
+    def get_gmail_token(self, *, email: str) -> Optional[str]:
+        try:
+            response = self.session.get(
+                self._rest("gmail_tokens"),
+                params={"email": f"eq.{email}", "select": "token_json", "limit": 1},
+                headers=self._headers,
+                timeout=30,
+            )
+            if response.status_code == 404:
+                return None
+            response.raise_for_status()
+            items = response.json() or []
+            if not items:
+                return None
+            token_json = items[0].get("token_json")
+            # token_json might already be a string or a dict depending on PostgREST settings
+            if isinstance(token_json, str):
+                return token_json
+            if isinstance(token_json, dict):
+                import json as _json
+
+                return _json.dumps(token_json)
+            return None
+        except requests.RequestException:
+            # Table may not exist or Supabase unreachable; degrade gracefully
+            return None
+
+    def upsert_gmail_token(self, *, email: str, token_json: str) -> None:
+        try:
+            payload = {"email": email, "token_json": token_json}
+            response = self.session.post(
+                self._rest("gmail_tokens"),
+                headers={**self._headers, "Prefer": "return=minimal,resolution=merge-duplicates"},
+                data=json.dumps(payload),
+                timeout=30,
+            )
+            # Some configurations return 201, some 204
+            if response.status_code not in (200, 201, 204):
+                response.raise_for_status()
+        except requests.RequestException:
+            # Non-critical; ignore if the table is missing
+            return
+
 
 class NullStateStore(BaseStateStore):
     """
@@ -325,6 +380,7 @@ class NullStateStore(BaseStateStore):
         self.decisions: Dict[str, Dict[str, Any]] = {}
         self.alerts: Dict[str, Dict[str, Any]] = {}
         self.summaries: Dict[str, MessageSummary] = {}
+        self.tokens: Dict[str, str] = {}
 
     def get_mailbox(self, email: str) -> Optional[MailboxState]:
         return self.mailboxes.get(email)
@@ -408,6 +464,13 @@ class NullStateStore(BaseStateStore):
 
     def delete_message_summary(self, *, gmail_id: str, mailbox_email: str) -> None:
         self.summaries.pop(f"{mailbox_email}:{gmail_id}", None)
+
+    # --- OAuth token storage ----------------------------------------------
+    def get_gmail_token(self, *, email: str) -> Optional[str]:
+        return self.tokens.get(email)
+
+    def upsert_gmail_token(self, *, email: str, token_json: str) -> None:
+        self.tokens[email] = token_json
 
 
 def get_state_store(url: Optional[str] = None, service_role_key: Optional[str] = None) -> BaseStateStore:

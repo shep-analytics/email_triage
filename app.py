@@ -191,11 +191,28 @@ def gmail_service_factory(email: str, *, scopes=None):
         )
     token_file = _token_file_for(email)
     allow_flow = _true(os.getenv("GMAIL_ALLOW_OAUTH_FLOW"))
+    # Prefer Supabase-stored tokens when available
+    oauth_json = None
+    try:
+        oauth_json = state_store.get_gmail_token(email=email)
+    except Exception:
+        oauth_json = None
+
+    def _persist_token(updated_json: str) -> None:
+        try:
+            state_store.upsert_gmail_token(email=email, token_json=updated_json)
+        except Exception:
+            # Best-effort; ignore persistence failures
+            pass
+
     return build_gmail_service(
         oauth_client_secret=oauth_client_secret,
         oauth_token_file=str(token_file),
+        oauth_credentials_json=oauth_json,
         allow_oauth_flow=allow_flow,
         scopes=scopes,
+        oauth_flow_mode=os.getenv("GMAIL_OAUTH_FLOW"),
+        token_update_cb=_persist_token,
     )
 
 

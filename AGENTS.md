@@ -175,6 +175,7 @@ What Future Agents Should Know
 - Do not log secrets, tokens, or raw ID tokens. The UI sends Google ID tokens; server validates against `GOOGLE_OAUTH_CLIENT_ID`.
 - Gmail scopes: Changing scopes requires a new consent/token; prefer adding via `GMAIL_EXTRA_SCOPES` when unavoidable.
 - If adding features that persist data, extend Supabase tables and update both `SupabaseStateStore` and the docs.
+- Gmail OAuth tokens can now be stored in Supabase (optional) in table `gmail_tokens(email text primary key, token_json jsonb, scopes text[] null, updated_at timestamptz default now())`. The app will prefer Supabase tokens when present; otherwise it falls back to `.gmail_tokens/` files. Creating this table requires running SQL once in Supabase (see Runbooks below). All token persistence is best‑effort; failures do not block runtime.
 - Viewer summaries are cached in Supabase `messages` rows with `state='summary'`; keep that convention so clean-up (including delete) can purge them reliably. Summaries and auto-draft responses expect plain-text output from the LLM (no Markdown or code fences).
 - For tests and local validation, prefer using `verify_e2e.py` or dry runs. Avoid writing broad integration tests that call external APIs unless feature work requires it.
 - please update this file AGENTS.md after all calls if anything has changed. This file AGENTS.md should remain up to date, anything changed should be reflected in this file and this file should remain up to date.
@@ -198,6 +199,7 @@ Common Pitfalls
 
 Runbooks — Handy Commands
 - Bootstrap OAuth token: `python3 bootstrap_gmail_token.py you@example.com`
+- Headless/terminal OAuth: set `GMAIL_OAUTH_FLOW=console` or run `python3 bootstrap_gmail_token.py you@example.com --mode console` (prints a URL and device code). The script also upserts the token to Supabase if `keys.py` contains Supabase creds and the `gmail_tokens` table exists.
 - Local API: `uvicorn app:app --reload`
 - Start/refresh watches: `curl -X POST http://localhost:8000/gmail/watch`
 - Dry-run LLM: `curl -X POST http://localhost:8000/dry-run -H 'Content-Type: application/json' -d '{"sender":"x@y","to":"me@y","subject":"Hi","snippet":"..."}'`
@@ -232,7 +234,13 @@ Updates
 - 2025-10-19: Viewer integration + metadata-safe filters. `/api/messages` now resolves custom labels to their Gmail IDs instead of using the search `q` parameter, so tokens that only have `gmail.metadata` no longer fail with "Metadata scope does not support 'q' parameter". Cleanup batch results show counts plus viewer shortcuts instead of separate message cards; the viewer auto-loads the relevant label. Files touched: `app.py`, `static/index.html`, `static/app.js`, `static/styles.css`.
 - 2025-10-20: Viewer metadata fallback. The `/api/messages/{id}` endpoint now catches metadata-scope-only tokens and returns the snippet with a warning instead of a hard 403. The UI surfaces the warning inline. Reply endpoint reuses the metadata fallback so users can still respond even if full bodies are blocked. Files touched: `app.py`, `static/app.js`, `static/styles.css`.
 - 2025-10-20: Viewer summaries + AI drafts. `/api/messages/{id}/summary` generates and caches short LLM summaries per message (stored in Supabase `messages.state='summary'` and cleared on delete). The UI shows the summary on load and falls back gracefully if generation fails. Added `/api/messages/{id}/respond` to produce a draft reply using recent Sent mail to match tone; viewer exposes a “Draft reply” button that pre-fills the reply box. HTML bodies now render inline instead of showing “(no text body)”. Files touched: `app.py`, `supabase_state.py`, `static/app.js`, `static/styles.css`.
- - 2025-10-24: Viewer metadata fallback improved. When a mailbox token only has `gmail.metadata`, Gmail omits both bodies and snippets on `messages.get`. The viewer now falls back to the snippet fetched during list-time when you press View, so you no longer see just “(no text body)”. Backend summary generation also falls back to the Subject line when both body and snippet are unavailable, ensuring an AI summary is still produced. Files touched: `static/app.js`, `app.py`. Deployed and verified via `verify_e2e.py --skip-deploy`.
+- 2025-10-24: Viewer metadata fallback improved. When a mailbox token only has `gmail.metadata`, Gmail omits both bodies and snippets on `messages.get`. The viewer now falls back to the snippet fetched during list-time when you press View, so you no longer see just “(no text body)”. Backend summary generation also falls back to the Subject line when both body and snippet are unavailable, ensuring an AI summary is still produced. Files touched: `static/app.js`, `app.py`. Deployed and verified via `verify_e2e.py --skip-deploy`.
+ - 2025-10-24: Terminal OAuth + Supabase tokens. Added console/device-code OAuth flow support and optional Supabase token storage.
+   - New env: `GMAIL_OAUTH_FLOW=console|local_server` (default `local_server`).
+   - `bootstrap_gmail_token.py --mode console` supports headless terminals and upserts tokens to Supabase when configured.
+   - `gmail_watch.build_gmail_service` now accepts a token update callback so app/bootstrap can persist refreshed tokens to Supabase. App prefers Supabase tokens if table `gmail_tokens` exists.
+   - Schema to create in Supabase once:
+     `create table if not exists gmail_tokens ( email text primary key, token_json jsonb not null, scopes text[] null, updated_at timestamptz not null default now() );`
 
 Behavioral Notes
 - UI batch runs: one batch only, no Telegram. Call again to process the next batch.

@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 import os
 from dataclasses import dataclass
-from typing import Any, Dict, Iterable, List, Optional, Sequence
+from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence
 
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
@@ -56,8 +56,11 @@ def build_gmail_service(
     delegated_user: Optional[str] = None,
     oauth_client_secret: Optional[str] = None,
     oauth_token_file: Optional[str] = None,
+    oauth_credentials_json: Optional[str] = None,
     scopes: Iterable[str] = GMAIL_READ_SCOPES,
     allow_oauth_flow: bool = True,
+    oauth_flow_mode: Optional[str] = None,
+    token_update_cb: Optional[Callable[[str], None]] = None,
 ):
     """
     Create a Gmail API service client.
@@ -85,12 +88,26 @@ def build_gmail_service(
         if not oauth_client_secret:
             raise ValueError("oauth_client_secret is required when service_account_file is not provided.")
         credentials = None
-        if oauth_token_file and os.path.exists(oauth_token_file):
+        if oauth_credentials_json:
+            try:
+                credentials = Credentials.from_authorized_user_info(json.loads(oauth_credentials_json), scopes=scopes)
+            except Exception:
+                credentials = None
+        if not credentials and oauth_token_file and os.path.exists(oauth_token_file):
             credentials = Credentials.from_authorized_user_file(oauth_token_file, scopes=scopes)
 
         if not credentials or not credentials.valid:
             if credentials and credentials.expired and credentials.refresh_token:
                 credentials.refresh(Request())
+                try:
+                    serialized = credentials.to_json()
+                    if oauth_token_file:
+                        with open(oauth_token_file, "w", encoding="utf-8") as token_handle:
+                            token_handle.write(serialized)
+                    if token_update_cb:
+                        token_update_cb(serialized)
+                except Exception:
+                    pass
             else:
                 if not allow_oauth_flow:
                     raise RuntimeError(
@@ -98,10 +115,21 @@ def build_gmail_service(
                         "Run bootstrap_gmail_token.py locally to generate a refresh token, commit the token file, and redeploy."
                     )
                 flow = InstalledAppFlow.from_client_secrets_file(oauth_client_secret, scopes=scopes)
-                credentials = flow.run_local_server(port=0)
-            if oauth_token_file:
-                with open(oauth_token_file, "w", encoding="utf-8") as token_handle:
-                    token_handle.write(credentials.to_json())
+                # Allow console-based device flow when running in headless terminals
+                chosen_mode = (oauth_flow_mode or os.getenv("GMAIL_OAUTH_FLOW", "local_server")).strip().lower()
+                if chosen_mode in {"console", "device", "device_code"}:
+                    credentials = flow.run_console()
+                else:
+                    credentials = flow.run_local_server(port=0)
+                try:
+                    serialized = credentials.to_json()
+                    if oauth_token_file:
+                        with open(oauth_token_file, "w", encoding="utf-8") as token_handle:
+                            token_handle.write(serialized)
+                    if token_update_cb:
+                        token_update_cb(serialized)
+                except Exception:
+                    pass
 
     return build("gmail", "v1", credentials=credentials)
 
