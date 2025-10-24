@@ -970,6 +970,22 @@ function buildViewerCard(item) {
           const warning = document.createElement("div");
           warning.className = "viewer-warning";
           warning.textContent = data.permission_warning;
+          // Offer a quick re-connect action when available
+          if (state.config?.oauth_connect_enabled) {
+            const btn = document.createElement("button");
+            btn.className = "secondary";
+            btn.textContent = "Connect Gmail";
+            btn.addEventListener("click", async () => {
+              try {
+                await startGmailConnect();
+              } catch (e) {
+                // Surface error inline
+                setStatus(viewerStatus, e?.message || "Failed to start connect flow.", true);
+              }
+            });
+            warning.appendChild(document.createTextNode(" "));
+            warning.appendChild(btn);
+          }
           content.appendChild(warning);
         }
         const hasHtml = Boolean(data.body_html && data.body_html.trim());

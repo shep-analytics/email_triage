@@ -457,6 +457,11 @@ def _load_message_payload(service, mailbox: str, gmail_id: str) -> Tuple[Dict[st
             permission_warning = (
                 "Mailbox token only grants gmail.metadata. Re-consent with gmail.readonly or gmail.modify to view full content."
             )
+            logger.warning(
+                "Metadata-only token detected for %s when fetching %s; returned headers only. Consider re-consenting with read scopes.",
+                mailbox,
+                gmail_id,
+            )
         elif (
             status == 403
             or "insufficientpermissions" in lowered
@@ -476,6 +481,8 @@ def _load_message_payload(service, mailbox: str, gmail_id: str) -> Tuple[Dict[st
     headers = _extract_headers_from_metadata(message)
     text_body, html_body = _extract_bodies(message.get("payload", {}))
     if metadata_only:
+        # For metadata-only tokens Gmail may also omit the snippet.
+        # Preserve whatever we have so the UI can fall back to the list-time snippet.
         text_body = message.get("snippet", "") or text_body
         html_body = ""
     return message, headers, text_body, html_body, metadata_only, permission_warning
@@ -1181,6 +1188,12 @@ async def list_messages(
             # Fallback to minimal fields if metadata fetch fails
             metadata = {"id": mid, "snippet": ""}
         headers = _extract_headers_from_metadata(metadata)
+        if not metadata.get("snippet"):
+            logger.debug(
+                "No snippet returned for %s message %s using metadata format. Token may lack read scopes.",
+                mailbox,
+                mid,
+            )
         items.append(
             {
                 "gmail_id": metadata.get("id", mid),
