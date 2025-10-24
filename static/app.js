@@ -810,6 +810,10 @@ function buildViewerCard(item) {
   const card = document.createElement("div");
   card.className = "message-card";
   card.dataset.gmailId = item.gmail_id;
+  // Preserve the list-time snippet so we can fall back to it
+  // when the GET /api/messages/{id} response lacks a snippet
+  // (which happens for metadata-scope-only tokens).
+  card.dataset.snippet = item.snippet || "";
   card.innerHTML = `
     <h4>${escapeHtml(item.subject || "(no subject)")}</h4>
     <p class="message-meta">From: ${escapeHtml(item.from || "")} • ${escapeHtml(item.date || "")}</p>
@@ -944,7 +948,10 @@ function buildViewerCard(item) {
         if (!hasHtml && !hasText) {
           const fallback = document.createElement("p");
           fallback.className = "viewer-empty";
-          fallback.textContent = data.snippet || "(no text body)";
+          // For metadata-only tokens Gmail omits snippet on the get() call.
+          // Fall back to the snippet we fetched during list() so users still
+          // see something useful when pressing View.
+          fallback.textContent = data.snippet || card.dataset.snippet || "(no text body)";
           content.appendChild(fallback);
         }
         bodyEl.innerHTML = "";

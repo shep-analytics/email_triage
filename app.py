@@ -587,9 +587,13 @@ def _generate_message_summary(mailbox: str, gmail_id: str) -> MessageSummary:
     body_text = text_body.strip()
     if not body_text and html_body:
         body_text = _html_to_text(html_body)
-    snippet = message.get("snippet", "")
+    snippet = message.get("snippet", "") or ""
+    # When operating with metadata-only scopes, Gmail omits the snippet on
+    # messages.get(..., format='metadata'). In that case, fall back to the
+    # subject line so the UI can still show a useful one‑line summary.
     if not (body_text or snippet):
-        raise HTTPException(status_code=404, detail="Email content is empty; nothing to summarise.")
+        subject_fallback = headers.get("subject", "").strip()
+        snippet = subject_fallback or "(no body or snippet available)"
     prompt = _format_summary_prompt(
         mailbox_email=mailbox,
         headers=headers,
