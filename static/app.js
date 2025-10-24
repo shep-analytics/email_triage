@@ -29,8 +29,7 @@ const cleanupStatus = document.getElementById("cleanup-status");
 const cleanupSummary = document.getElementById("cleanup-summary");
 const cleanupCounts = document.getElementById("cleanup-counts");
 const cleanupLog = document.getElementById("cleanup-log");
-const requiresResponseList = document.getElementById("requires-response-list");
-const shouldReadList = document.getElementById("should-read-list");
+const cleanupShortcuts = document.getElementById("cleanup-shortcuts");
 const batchSizeInput = document.getElementById("batch-size");
 const runCleanupBtn = document.getElementById("run-cleanup");
 const cancelCleanupBtn = document.getElementById("cancel-cleanup");
@@ -183,8 +182,7 @@ function handleLogout() {
   state.user = null;
   cleanupSummary.classList.add("hidden");
   cleanupCounts.innerHTML = "";
-  requiresResponseList.innerHTML = "";
-  shouldReadList.innerHTML = "";
+  if (cleanupShortcuts) cleanupShortcuts.innerHTML = "";
   setStatus(cleanupStatus, "Signed out.", false);
   setStatus(criteriaStatus, "", false);
   appView.classList.add("hidden");
@@ -207,6 +205,7 @@ async function handleRunCleanup() {
   // Start streaming job
   if (cleanupLog) cleanupLog.innerHTML = "";
   cleanupSummary.classList.add("hidden");
+  if (cleanupShortcuts) cleanupShortcuts.innerHTML = "";
   displayCounts({});
   setStatus(cleanupStatus, "Starting cleanup...", false);
   runCleanupBtn.disabled = true;
@@ -360,8 +359,26 @@ function displayCounts(counts) {
 function displayCleanupResult(result) {
   cleanupSummary.classList.remove("hidden");
   renderCounts(result.counts || {});
-  renderMessageList(requiresResponseList, result.requires_response || []);
-  renderMessageList(shouldReadList, result.should_read || []);
+  renderCleanupShortcuts(result);
+  const requiresCount = (result.requires_response || []).length;
+  const shouldReadCount = (result.should_read || []).length;
+  if (requiresCount > 0) {
+    setStatus(
+      viewerStatus,
+      `Cleanup produced ${requiresCount} Requires Response message${requiresCount === 1 ? "" : "s"}. Loading viewer…`,
+      false,
+    );
+    loadViewer("requires_response").catch((error) => console.error("Failed to load requires_response view", error));
+  } else if (shouldReadCount > 0) {
+    setStatus(
+      viewerStatus,
+      `Cleanup produced ${shouldReadCount} Should Read message${shouldReadCount === 1 ? "" : "s"}. Loading viewer…`,
+      false,
+    );
+    loadViewer("should_read").catch((error) => console.error("Failed to load should_read view", error));
+  } else {
+    setStatus(viewerStatus, "No follow-up items produced in this batch.", false);
+  }
 }
 
 function renderCounts(counts) {
@@ -380,97 +397,48 @@ function renderCounts(counts) {
   }
 }
 
-function renderMessageList(container, items) {
-  container.innerHTML = "";
-  if (!items.length) {
+function renderCleanupShortcuts(result) {
+  if (!cleanupShortcuts) return;
+  cleanupShortcuts.innerHTML = "";
+  const requiresCount = (result.requires_response || []).length;
+  const shouldReadCount = (result.should_read || []).length;
+  if (!requiresCount && !shouldReadCount) {
     const empty = document.createElement("p");
-    empty.textContent = "Nothing in this category.";
     empty.className = "message-empty";
-    container.appendChild(empty);
+    empty.textContent = "No follow-up items generated in this batch.";
+    cleanupShortcuts.appendChild(empty);
     return;
   }
-  items.forEach((item) => {
-    container.appendChild(buildMessageCard(item));
-  });
-}
+  const summaryLine = document.createElement("p");
+  summaryLine.className = "cleanup-summary-text";
+  const parts = [];
+  if (requiresCount) parts.push(`${requiresCount} Requires Response`);
+  if (shouldReadCount) parts.push(`${shouldReadCount} Should Read`);
+  const totalFollowUps = requiresCount + shouldReadCount;
+  summaryLine.textContent = `Review ${parts.join(" and ")} message${totalFollowUps === 1 ? "" : "s"} in the viewer.`;
+  cleanupShortcuts.appendChild(summaryLine);
 
-function buildMessageCard(item) {
-  const card = document.createElement("div");
-  card.className = "message-card";
-  card.dataset.gmailId = item.gmail_id;
-  card.dataset.subject = item.subject || "";
-  card.dataset.from = item.from || "";
-  const subject = escapeHtml(item.subject || "(no subject)");
-  const sender = escapeHtml(item.from || "");
-  const summary = escapeHtml(item.summary || "");
-  const reason = escapeHtml(item.reason || "");
-  card.innerHTML = `
-    <h4>${subject}</h4>
-    <p class="message-meta">From: ${sender}</p>
-    <p class="message-summary">${summary}</p>
-    <p class="message-reason">${reason}</p>
-    <div class="message-actions">
-      <label>
-        Desired action
-        <select class="action-select">
-          ${buildActionOptions()}
-        </select>
-      </label>
-      <label class="label-input">
-        Label name
-        <input type="text" class="label-value" value="Filed" />
-      </label>
-      <label>
-        Comment to add to prompt
-        <textarea class="comment-input" rows="2" placeholder="Why should this be treated differently?"></textarea>
-      </label>
-    </div>
-    <div class="actions-row">
-      <button class="apply-feedback">Apply feedback</button>
-    </div>
-    <div class="feedback-status"></div>
-  `;
-  const actionSelect = card.querySelector(".action-select");
-  const labelWrapper = card.querySelector(".label-input");
-  const labelInput = card.querySelector(".label-value");
-  const applyButton = card.querySelector(".apply-feedback");
-  const statusEl = card.querySelector(".feedback-status");
-  actionSelect.addEventListener("change", () => {
-    if (ACTIONS_REQUIRING_LABEL.has(actionSelect.value)) {
-      labelWrapper.classList.add("visible");
-    } else {
-      labelWrapper.classList.remove("visible");
-    }
-  });
-  actionSelect.dispatchEvent(new Event("change"));
-  applyButton.addEventListener("click", async () => {
-    try {
-      applyButton.disabled = true;
-      statusEl.textContent = "Submitting feedback...";
-      statusEl.classList.remove("error");
-      const payload = {
-        gmail_id: card.dataset.gmailId,
-        desired_category: actionSelect.value,
-        label: ACTIONS_REQUIRING_LABEL.has(actionSelect.value) ? labelInput.value.trim() || "Filed" : null,
-        comment: card.querySelector(".comment-input").value.trim(),
-      };
-      const response = await apiFetch("/api/cleanup/feedback", {
-        method: "POST",
-        body: JSON.stringify(payload),
-      });
-      statusEl.textContent = "Feedback applied and prompt updated.";
-      labelWrapper.classList.remove("visible");
-      setTimeout(() => {
-        statusEl.textContent = "";
-      }, 4000);
-      await loadCriteria();
-    } catch (error) {
-      statusEl.textContent = error.message;
-      statusEl.classList.add("error");
-      applyButton.disabled = false;
-    }
-  });
-  return card;
+  const buttonRow = document.createElement("div");
+  buttonRow.className = "shortcut-buttons";
+  if (requiresCount) {
+    const btn = document.createElement("button");
+    btn.className = "secondary";
+    btn.textContent = `Open Requires Response (${requiresCount})`;
+    btn.addEventListener("click", () => {
+      loadViewer("requires_response").catch((error) => console.error("Failed to load requires_response view", error));
+    });
+    buttonRow.appendChild(btn);
+  }
+  if (shouldReadCount) {
+    const btn = document.createElement("button");
+    btn.className = "secondary";
+    btn.textContent = `Open Should Read (${shouldReadCount})`;
+    btn.addEventListener("click", () => {
+      loadViewer("should_read").catch((error) => console.error("Failed to load should_read view", error));
+    });
+    buttonRow.appendChild(btn);
+  }
+  cleanupShortcuts.appendChild(buttonRow);
 }
 
 function buildActionOptions() {

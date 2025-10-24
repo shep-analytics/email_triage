@@ -150,10 +150,22 @@ textarea {
   color: #1e3a8a;
 }
 
-.message-groups {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
-  gap: 20px;
+.cleanup-shortcuts {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.cleanup-summary-text {
+  margin: 0;
+  font-size: 14px;
+  color: #374151;
+}
+
+.shortcut-buttons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
 }
 
 .message-list {

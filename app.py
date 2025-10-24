@@ -5,6 +5,7 @@ from pathlib import Path
 import asyncio
 import uuid
 import json
+from threading import Lock
 from typing import Any, Dict, List, Optional, Tuple
 import base64
 import email.utils as email_utils
@@ -17,7 +18,12 @@ from google.auth.transport import requests as google_auth_requests
 from google.oauth2 import id_token
 from pydantic import BaseModel, Field
 
-from gmail_processor import CleanupCategory, GmailProcessor
+from gmail_processor import (
+    CleanupCategory,
+    GmailProcessor,
+    _DEFAULT_REQUIRES_RESPONSE_LABEL,
+    _DEFAULT_SHOULD_READ_LABEL,
+)
 from gmail_watch import (
     GmailAccount,
     build_gmail_service,
@@ -84,6 +90,10 @@ def _allowed_login_emails() -> List[str]:
     return ["alexsheppert@gmail.com"]
 
 
+REQUIRES_RESPONSE_LABEL_NAME = _DEFAULT_REQUIRES_RESPONSE_LABEL
+SHOULD_READ_LABEL_NAME = _DEFAULT_SHOULD_READ_LABEL
+
+
 def _cleanup_action_description(category: CleanupCategory, label: Optional[str]) -> str:
     if category == "spam":
         return "delete them as spam."
@@ -93,9 +103,9 @@ def _cleanup_action_description(category: CleanupCategory, label: Optional[str])
         label_name = label or "Filed"
         return f"archive them with the '{label_name}' label."
     if category == "requires_response":
-        return "leave them in the inbox under the 'Requiring Response' label."
+        return f"leave them in the inbox under the '{REQUIRES_RESPONSE_LABEL_NAME}' label."
     if category == "should_read":
-        return "leave them in the inbox under the 'User Should Read' label."
+        return f"leave them in the inbox under the '{SHOULD_READ_LABEL_NAME}' label."
     return "apply the specified cleanup action."
 
 
@@ -176,6 +186,46 @@ def gmail_service_factory(email: str, *, scopes=None):
         allow_oauth_flow=allow_flow,
         scopes=scopes,
     )
+
+
+_label_cache: Dict[str, Dict[str, str]] = {}
+_label_cache_lock = Lock()
+
+
+def _clear_label_cache(mailbox: str) -> None:
+    with _label_cache_lock:
+        _label_cache.pop(mailbox, None)
+
+
+def _labels_for_mailbox(service, mailbox: str) -> Dict[str, str]:
+    with _label_cache_lock:
+        cached = _label_cache.get(mailbox)
+    if cached is not None:
+        return cached
+    response = service.users().labels().list(userId=mailbox).execute()
+    labels = response.get("labels", []) or []
+    mapping: Dict[str, str] = {}
+    for item in labels:
+        name = item.get("name")
+        identifier = item.get("id")
+        if name and identifier:
+            mapping[name.lower()] = identifier
+    with _label_cache_lock:
+        _label_cache[mailbox] = mapping
+    return mapping
+
+
+def _resolve_label_id(service, mailbox: str, label_name: str) -> Optional[str]:
+    normalized = (label_name or "").strip().lower()
+    if not normalized:
+        return None
+    labels = _labels_for_mailbox(service, mailbox)
+    label_id = labels.get(normalized)
+    if label_id:
+        return label_id
+    _clear_label_cache(mailbox)
+    labels = _labels_for_mailbox(service, mailbox)
+    return labels.get(normalized)
 
 
 telegram_token = _telegram_value("TELEGRAM_BOT_TOKEN", keys_telegram_token, "TELEGRAM_BOT_TOKEN")
@@ -611,24 +661,33 @@ async def list_messages(
         "userId": mailbox,
         "maxResults": max_results,
     }
-    q = None
+    requested_label_ids: List[str] = []
+    label_name_filter: Optional[str] = None
     if label == "inbox":
-        kwargs["labelIds"] = ["INBOX"]
+        requested_label_ids = ["INBOX"]
     elif label == "requires_response":
-        q = 'label:"Requiring Response"'
+        label_name_filter = REQUIRES_RESPONSE_LABEL_NAME
     elif label == "should_read":
-        q = 'label:"User Should Read"'
+        label_name_filter = SHOULD_READ_LABEL_NAME
     elif label == "all":
-        # no filters
         pass
     else:
         raise HTTPException(status_code=400, detail="Unsupported label filter.")
-    if q:
-        kwargs["q"] = q
     if page_token:
         kwargs["pageToken"] = page_token
 
     try:
+        if label_name_filter:
+            label_id = _resolve_label_id(service, mailbox, label_name_filter)
+            if not label_id:
+                return {
+                    "items": [],
+                    "next_page_token": None,
+                    "result_size_estimate": 0,
+                }
+            requested_label_ids = ["INBOX", label_id]
+        if requested_label_ids:
+            kwargs["labelIds"] = requested_label_ids
         response = service.users().messages().list(**kwargs).execute()
     except HttpError as he:  # type: ignore
         # Provide clearer error details for common permission/scope issues
