@@ -111,7 +111,9 @@ function updateLoginHint() {
     return;
   }
   const allowed = state.config.allowed_emails || [];
-  if (allowed.length) {
+  if (allowed.includes("*")) {
+    hintEl.textContent = "Any Google account can sign in.";
+  } else if (allowed.length) {
     hintEl.textContent = `Allowed account: ${allowed.join(", ")}`;
   }
   if (connectGmailBtn) {
@@ -205,6 +207,15 @@ async function handleCredentialResponse(response) {
     state.user = decodeJwt(response.credential);
     showMainView();
     setStatus(cleanupStatus, "Signed in. Ready to run cleanup.", false);
+    // If the server has OAuth web client configured, try to connect Gmail
+    // immediately so first‑time users get set up without hunting for a button.
+    if (state.config?.oauth_connect_enabled) {
+      try {
+        await startGmailConnect();
+      } catch (e) {
+        // Popup may be blocked; leave the Connect button visible.
+      }
+    }
     await loadCriteria();
   } catch (error) {
     console.error("Failed to process credential", error);
