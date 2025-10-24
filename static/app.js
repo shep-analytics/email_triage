@@ -3,6 +3,9 @@ const state = {
   user: null,
   config: null,
   criteria: [],
+  summaries: new Map(),
+  summaryPromises: new Map(),
+  draftPromises: new Map(),
   viewer: {
     label: null,
     nextPageToken: null,
@@ -62,6 +65,36 @@ function escapeHtml(value) {
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;")
     .replace(/'/g, "&#039;");
+}
+
+function sanitizeAndCloneHtml(html) {
+  const template = document.createElement("template");
+  template.innerHTML = html || "";
+  const forbiddenSelector = "script,style,link,meta,iframe,object,embed";
+  template.content.querySelectorAll(forbiddenSelector).forEach((node) => node.remove());
+  const walker = document.createTreeWalker(template.content, NodeFilter.SHOW_ELEMENT, null);
+  while (walker.nextNode()) {
+    const el = walker.currentNode;
+    if (!(el instanceof Element)) continue;
+    [...el.attributes].forEach((attr) => {
+      if (attr.name.startsWith("on") || attr.name === "style") {
+        el.removeAttribute(attr.name);
+      }
+    });
+  }
+  return template.content.cloneNode(true);
+}
+
+function stripCodeFences(text) {
+  if (!text) return "";
+  const trimmed = text.trim();
+  if (trimmed.startsWith("```") && trimmed.endsWith("```")) {
+    const lines = trimmed.split(/\r?\n/);
+    if (lines.length >= 3) {
+      return lines.slice(1, -1).join("\n").trim();
+    }
+  }
+  return trimmed;
 }
 
 async function init() {
@@ -180,6 +213,9 @@ function showMainView() {
 function handleLogout() {
   state.token = null;
   state.user = null;
+  state.summaries.clear();
+  state.summaryPromises.clear();
+  state.draftPromises.clear();
   cleanupSummary.classList.add("hidden");
   cleanupCounts.innerHTML = "";
   if (cleanupShortcuts) cleanupShortcuts.innerHTML = "";
@@ -726,6 +762,50 @@ async function loadViewerNextPage() {
   }
 }
 
+async function fetchMessageSummary(gmailId) {
+  if (!gmailId) return "";
+  if (state.summaries.has(gmailId)) {
+    return state.summaries.get(gmailId) || "";
+  }
+  if (state.summaryPromises.has(gmailId)) {
+    return state.summaryPromises.get(gmailId);
+  }
+  const promise = (async () => {
+    try {
+      const response = await apiFetch(`/api/messages/${encodeURIComponent(gmailId)}/summary`);
+      const summary = stripCodeFences(response.summary || "").trim();
+      if (summary) {
+        state.summaries.set(gmailId, summary);
+      }
+      return summary;
+    } finally {
+      state.summaryPromises.delete(gmailId);
+    }
+  })();
+  state.summaryPromises.set(gmailId, promise);
+  return promise;
+}
+
+async function fetchDraftReply(gmailId) {
+  if (!gmailId) return "";
+  if (state.draftPromises.has(gmailId)) {
+    return state.draftPromises.get(gmailId);
+  }
+  const promise = (async () => {
+    try {
+      const response = await apiFetch(`/api/messages/${encodeURIComponent(gmailId)}/respond`, {
+        method: "POST",
+        body: JSON.stringify({}),
+      });
+      return stripCodeFences(response.draft || "").trim();
+    } finally {
+      state.draftPromises.delete(gmailId);
+    }
+  })();
+  state.draftPromises.set(gmailId, promise);
+  return promise;
+}
+
 function buildViewerCard(item) {
   const card = document.createElement("div");
   card.className = "message-card";
@@ -733,10 +813,15 @@ function buildViewerCard(item) {
   card.innerHTML = `
     <h4>${escapeHtml(item.subject || "(no subject)")}</h4>
     <p class="message-meta">From: ${escapeHtml(item.from || "")} • ${escapeHtml(item.date || "")}</p>
-    <p class="message-summary">${escapeHtml(item.snippet || "")}</p>
+    <p class="message-summary">
+      <span class="summary-label">Summary:</span>
+      <span class="summary-text">${escapeHtml(item.summary || "Generating summary…")}</span>
+    </p>
+    <p class="message-snippet">${escapeHtml(item.snippet || "")}</p>
     <div class="actions-row">
       <button class="view-btn secondary">View</button>
-      <button class="reply-btn">Reply</button>
+      <button class="respond-btn">Draft reply</button>
+      <button class="reply-btn secondary">Reply</button>
       <button class="archive-btn secondary">Archive</button>
       <button class="delete-btn danger">Delete</button>
     </div>
@@ -774,6 +859,7 @@ function buildViewerCard(item) {
     </div>
   `;
   const viewBtn = card.querySelector(".view-btn");
+  const respondBtn = card.querySelector(".respond-btn");
   const replyBtn = card.querySelector(".reply-btn");
   const archiveBtn = card.querySelector(".archive-btn");
   const deleteBtn = card.querySelector(".delete-btn");
@@ -788,6 +874,29 @@ function buildViewerCard(item) {
   const labelInput = card.querySelector(".label-value");
   const applyButton = card.querySelector(".apply-feedback");
   const feedbackStatus = card.querySelector(".feedback-status");
+  const summaryRow = card.querySelector(".message-summary");
+  const summaryText = card.querySelector(".summary-text");
+
+  if (item.summary) {
+    state.summaries.set(card.dataset.gmailId, item.summary);
+    summaryText.textContent = item.summary;
+    summaryRow.classList.remove("loading");
+  } else {
+    summaryRow.classList.add("loading");
+    summaryRow.classList.remove("error");
+    summaryText.textContent = "Generating summary…";
+    fetchMessageSummary(card.dataset.gmailId)
+      .then((summary) => {
+        summaryText.textContent = summary || "No summary available.";
+        summaryRow.classList.remove("loading");
+        summaryRow.classList.remove("error");
+      })
+      .catch((error) => {
+        summaryText.textContent = error?.message || "Failed to summarise.";
+        summaryRow.classList.remove("loading");
+        summaryRow.classList.add("error");
+      });
+  }
 
   let loaded = false;
   viewBtn.addEventListener("click", async () => {
@@ -804,9 +913,33 @@ function buildViewerCard(item) {
           warning.textContent = data.permission_warning;
           content.appendChild(warning);
         }
-        const text = document.createElement("pre");
-        text.textContent = data.body_text || data.snippet || "(no text body)";
-        content.appendChild(text);
+        const hasHtml = Boolean(data.body_html && data.body_html.trim());
+        const hasText = Boolean(data.body_text && data.body_text.trim());
+        if (hasHtml) {
+          const htmlContainer = document.createElement("div");
+          htmlContainer.className = "viewer-html";
+          try {
+            htmlContainer.appendChild(sanitizeAndCloneHtml(data.body_html));
+          } catch (err) {
+            const fallback = document.createElement("pre");
+            fallback.className = "viewer-text";
+            fallback.textContent = stripCodeFences(data.body_text || data.body_html || "");
+            htmlContainer.appendChild(fallback);
+          }
+          content.appendChild(htmlContainer);
+        }
+        if (hasText) {
+          const textBlock = document.createElement("pre");
+          textBlock.className = "viewer-text";
+          textBlock.textContent = stripCodeFences(data.body_text);
+          content.appendChild(textBlock);
+        }
+        if (!hasHtml && !hasText) {
+          const fallback = document.createElement("p");
+          fallback.className = "viewer-empty";
+          fallback.textContent = data.snippet || "(no text body)";
+          content.appendChild(fallback);
+        }
         bodyEl.innerHTML = "";
         bodyEl.appendChild(content);
         loaded = true;
@@ -819,9 +952,31 @@ function buildViewerCard(item) {
     }
   });
 
+  respondBtn.addEventListener("click", async () => {
+    replyBox.classList.remove("hidden");
+    replyText.focus();
+    setStatus(replyStatus, "Drafting reply...", false);
+    try {
+      respondBtn.disabled = true;
+      const draft = await fetchDraftReply(card.dataset.gmailId);
+      if (!draft) {
+        setStatus(replyStatus, "Draft generator returned no content.", true);
+      } else {
+        replyText.value = draft;
+        setStatus(replyStatus, "Draft generated. Review before sending.", false);
+      }
+    } catch (error) {
+      setStatus(replyStatus, error?.message || "Failed to draft reply.", true);
+    } finally {
+      respondBtn.disabled = false;
+    }
+  });
+
   replyBtn.addEventListener("click", () => {
     replyBox.classList.remove("hidden");
     replyText.focus();
+    replyStatus.textContent = "";
+    replyStatus.classList.remove("error", "success");
   });
   cancelReplyBtn.addEventListener("click", () => {
     replyBox.classList.add("hidden");
@@ -876,6 +1031,9 @@ function buildViewerCard(item) {
         body: JSON.stringify({}),
       });
       card.remove();
+      state.summaries.delete(card.dataset.gmailId);
+      state.summaryPromises.delete(card.dataset.gmailId);
+      state.draftPromises.delete(card.dataset.gmailId);
     } catch (error) {
       deleteBtn.disabled = false;
       setStatus(viewerStatus, error.message, true);

@@ -6,9 +6,11 @@ import asyncio
 import uuid
 import json
 from threading import Lock
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 import base64
 import email.utils as email_utils
+import html
+import re
 
 from fastapi import Depends, FastAPI, HTTPException, Request, Body
 from fastapi.responses import FileResponse, StreamingResponse
@@ -31,12 +33,13 @@ from gmail_watch import (
     GMAIL_READ_SCOPES,
     GMAIL_SEND_SCOPES,
 )
+from query_LLM import DEFAULT_MODEL as LLM_DEFAULT_MODEL, query_llm
 try:
     from googleapiclient.errors import HttpError  # type: ignore
 except Exception:  # pragma: no cover
     HttpError = Exception  # fallback type alias
 from prompt_manager import PromptManager
-from supabase_state import BaseStateStore, MailboxState, get_state_store
+from supabase_state import BaseStateStore, MailboxState, MessageSummary, get_state_store
 from telegram_notify import send_telegram_message
 
 try:
@@ -159,6 +162,10 @@ def _telegram_value(config_attr: str, keys_value: Optional[str], env_name: str) 
 
 def _true(value: Optional[str]) -> bool:
     return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+
+SUMMARY_BODY_CHAR_LIMIT = 4000
+SUMMARY_TARGET_SENT_EMAILS = 6
 
 
 def gmail_service_factory(email: str, *, scopes=None):
@@ -339,6 +346,292 @@ def _extract_bodies(payload: Dict[str, Any]) -> Tuple[str, str]:
                 except Exception:
                     pass
     return ("\n".join(text_parts).strip(), "\n".join(html_parts).strip())
+
+
+def _html_to_text(html_value: str) -> str:
+    if not html_value:
+        return ""
+    # Remove scripts/styles entirely to avoid leaking non-visible text into summaries.
+    cleaned = re.sub(r"(?is)<(script|style|head|title)[^>]*>.*?</\\1>", " ", html_value)
+    cleaned = re.sub(r"(?i)<br\s*/?>", "\n", cleaned)
+    cleaned = re.sub(r"(?i)</p>", "\n", cleaned)
+    cleaned = re.sub(r"(?i)<li>", "\n- ", cleaned)
+    cleaned = re.sub(r"(?is)<[^>]+>", " ", cleaned)
+    cleaned = html.unescape(cleaned)
+    return " ".join(cleaned.split())
+
+
+def _strip_code_fences(text_value: str) -> str:
+    text_value = text_value.strip()
+    if text_value.startswith("```") and text_value.endswith("```"):
+        lines = text_value.splitlines()
+        if len(lines) >= 3:
+            return "\n".join(lines[1:-1]).strip()
+    return text_value
+
+
+def _trim_for_prompt(value: str, limit: int = SUMMARY_BODY_CHAR_LIMIT) -> str:
+    value = value.strip()
+    if len(value) <= limit:
+        return value
+    return value[: limit - 3].rstrip() + "..."
+
+
+def _clean_llm_text_output(value: str) -> str:
+    cleaned = _strip_code_fences(value)
+    cleaned = cleaned.strip()
+    if cleaned.startswith("\"") and cleaned.endswith("\"") and len(cleaned) >= 2:
+        cleaned = cleaned[1:-1].strip()
+    cleaned = re.sub(r"\s+", " ", cleaned)
+    return cleaned.strip()
+
+
+def _load_message_payload(service, mailbox: str, gmail_id: str) -> Tuple[Dict[str, Any], Dict[str, str], str, str, bool, str]:
+    metadata_only = False
+    permission_warning = ""
+    try:
+        message = (
+            service.users()
+            .messages()
+            .get(userId=mailbox, id=gmail_id, format="full")
+            .execute()
+        )
+    except HttpError as he:  # type: ignore
+        status = getattr(getattr(he, "resp", None), "status", 500)
+        raw = getattr(he, "content", b"")
+        try:
+            detail = raw.decode("utf-8") if isinstance(raw, (bytes, bytearray)) else str(raw)
+        except Exception:
+            detail = str(he)
+        msg = detail or str(he)
+        lowered = msg.lower()
+        if status == 403 and "metadata scope" in lowered:
+            message = (
+                service.users()
+                .messages()
+                .get(
+                    userId=mailbox,
+                    id=gmail_id,
+                    format="metadata",
+                    metadataHeaders=[
+                        "From",
+                        "To",
+                        "Subject",
+                        "Date",
+                        "Reply-To",
+                        "Message-ID",
+                        "References",
+                    ],
+                )
+                .execute()
+            )
+            metadata_only = True
+            permission_warning = (
+                "Mailbox token only grants gmail.metadata. Re-consent with gmail.readonly or gmail.modify to view full content."
+            )
+        elif (
+            status == 403
+            or "insufficientpermissions" in lowered
+            or "insufficient authentication scopes" in lowered
+            or "invalid_scope" in lowered
+            or "unauthorized_client" in lowered
+        ):
+            raise HTTPException(
+                status_code=403,
+                detail=(
+                    "Gmail permission error. Token may lack required scopes or be invalid. "
+                    "Re-consent locally or update domain-wide delegation scopes. Details: " + msg
+                ),
+            )
+        else:
+            raise HTTPException(status_code=500, detail=f"Failed to fetch message: {msg}")
+    headers = _extract_headers_from_metadata(message)
+    text_body, html_body = _extract_bodies(message.get("payload", {}))
+    if metadata_only:
+        text_body = message.get("snippet", "") or text_body
+        html_body = ""
+    return message, headers, text_body, html_body, metadata_only, permission_warning
+
+
+def _format_summary_prompt(
+    *,
+    mailbox_email: str,
+    headers: Dict[str, str],
+    body_text: str,
+    snippet: str,
+) -> str:
+    sender = headers.get("from", "")
+    subject = headers.get("subject", "(no subject)")
+    trimmed_body = _trim_for_prompt(body_text or snippet or "")
+    snippet_line = snippet.strip()
+    lines = [
+        "Summarize the following email for a busy founder:",
+        "- Output a single sentence no longer than 45 words.",
+        "- Highlight any asks, deadlines, or commitments.",
+        "- Do not use bullet points or quote the sender.",
+        "",
+        f"Mailbox: {mailbox_email}",
+        f"From: {sender}",
+        f"Subject: {subject}",
+        "",
+        "Email body:",
+        trimmed_body or snippet_line,
+    ]
+    if snippet_line and snippet_line not in trimmed_body:
+        lines.extend(["", "Gmail snippet:", snippet_line])
+    lines.extend(["", "Summary:"])
+    return "\n".join(lines)
+
+
+def _format_reply_prompt(
+    *,
+    mailbox_email: str,
+    headers: Dict[str, str],
+    target_body: str,
+    snippet: str,
+    sent_history: List[Dict[str, str]],
+) -> str:
+    sender = headers.get("from", "")
+    subject = headers.get("subject", "(no subject)")
+    history_lines: List[str] = []
+    for idx, entry in enumerate(sent_history, start=1):
+        body = entry.get("body", "").strip()
+        if not body:
+            continue
+        history_lines.extend(
+            [
+                f"Example {idx} — sent {entry.get('date', '').strip()} to {entry.get('to', '').strip() or 'unknown recipient'}:",
+                body,
+                "",
+            ]
+        )
+    history_block = "\n".join(history_lines).strip()
+    incoming_body = target_body or snippet or "(no body text)"
+    prompt_sections = [
+        "You are drafting an email reply for the following mailbox. Match their tone, cadence, and level of formality.",
+        "Write a complete reply including greeting and sign-off. Keep it concise and helpful.",
+        "Respond directly to the sender's request and incorporate details where appropriate.",
+        "Return only the email body text; do not include a subject line or additional commentary.",
+        "",
+        f"Mailbox owner: {mailbox_email}",
+    ]
+    if history_block:
+        prompt_sections.extend([
+            "",
+            "Previous emails they have sent (most recent first):",
+            history_block,
+        ])
+    prompt_sections.extend(
+        [
+            "",
+            "Incoming email to answer:",
+            f"From: {sender}",
+            f"Subject: {subject}",
+            "Body:",
+            incoming_body,
+            "",
+            "Draft reply:",
+        ]
+    )
+    return "\n".join(prompt_sections)
+
+
+def _load_recent_sent_messages(service, mailbox: str, *, limit: int = SUMMARY_TARGET_SENT_EMAILS) -> List[Dict[str, str]]:
+    try:
+        response = (
+            service.users()
+            .messages()
+            .list(userId=mailbox, labelIds=["SENT"], maxResults=limit)
+            .execute()
+        )
+    except HttpError as he:  # type: ignore
+        status = getattr(getattr(he, "resp", None), "status", 500)
+        detail = getattr(he, "content", b"")
+        lowered = str(detail).lower()
+        if status == 403 and ("insufficient" in lowered or "invalid_scope" in lowered):
+            # Without sent-message scope just return empty history.
+            return []
+        raise HTTPException(status_code=500, detail=f"Failed to read sent mail history: {detail}")
+    sent_items: List[Dict[str, str]] = []
+    for item in response.get("messages", []) or []:
+        mid = item.get("id")
+        if not mid:
+            continue
+        try:
+            message, headers, text_body, html_body, _, _ = _load_message_payload(service, mailbox, mid)
+        except HTTPException:
+            continue
+        body_text = text_body.strip()
+        if not body_text and html_body:
+            body_text = _html_to_text(html_body)
+        body_text = _trim_for_prompt(body_text, limit=1500)
+        sent_items.append(
+            {
+                "gmail_id": message.get("id", mid),
+                "subject": headers.get("subject", ""),
+                "to": headers.get("to", ""),
+                "date": headers.get("date", ""),
+                "body": body_text,
+            }
+        )
+    return sent_items
+
+
+def _generate_message_summary(mailbox: str, gmail_id: str) -> MessageSummary:
+    service = gmail_service_factory(mailbox)
+    message, headers, text_body, html_body, _, _ = _load_message_payload(service, mailbox, gmail_id)
+    body_text = text_body.strip()
+    if not body_text and html_body:
+        body_text = _html_to_text(html_body)
+    snippet = message.get("snippet", "")
+    if not (body_text or snippet):
+        raise HTTPException(status_code=404, detail="Email content is empty; nothing to summarise.")
+    prompt = _format_summary_prompt(
+        mailbox_email=mailbox,
+        headers=headers,
+        body_text=body_text,
+        snippet=snippet,
+    )
+    try:
+        response_text = query_llm(prompt)
+    except Exception as exc:  # pragma: no cover - network/LLM errors
+        raise HTTPException(status_code=502, detail=f"Failed to generate summary: {exc}") from exc
+    summary_text = _clean_llm_text_output(response_text)
+    if not summary_text:
+        raise HTTPException(status_code=502, detail="LLM returned an empty summary.")
+    model_used = os.getenv("OPENROUTER_MODEL") or LLM_DEFAULT_MODEL
+    return state_store.upsert_message_summary(
+        gmail_id=gmail_id,
+        mailbox_email=mailbox,
+        summary=summary_text,
+        model=model_used,
+    )
+
+
+def _generate_reply_draft(mailbox: str, gmail_id: str) -> str:
+    service = gmail_service_factory(mailbox)
+    message, headers, text_body, html_body, _, _ = _load_message_payload(service, mailbox, gmail_id)
+    body_text = text_body.strip()
+    if not body_text and html_body:
+        body_text = _html_to_text(html_body)
+    snippet = message.get("snippet", "")
+    target_body = _trim_for_prompt(body_text or snippet or "", limit=SUMMARY_BODY_CHAR_LIMIT)
+    sent_history = _load_recent_sent_messages(service, mailbox)
+    prompt = _format_reply_prompt(
+        mailbox_email=mailbox,
+        headers=headers,
+        target_body=target_body,
+        snippet=snippet,
+        sent_history=sent_history,
+    )
+    try:
+        response_text = query_llm(prompt)
+    except Exception as exc:  # pragma: no cover - network/LLM errors
+        raise HTTPException(status_code=502, detail=f"Failed to draft reply: {exc}") from exc
+    draft = _clean_llm_text_output(response_text)
+    if not draft:
+        raise HTTPException(status_code=502, detail="LLM returned an empty draft.")
+    return draft
 
 
 # ---------------------------------------------------------------------------
@@ -746,6 +1039,16 @@ async def list_messages(
                 "snippet": metadata.get("snippet", ""),
             }
         )
+    summary_lookup = state_store.get_message_summaries(
+        mailbox_email=mailbox,
+        gmail_ids=[item.get("gmail_id") for item in items],
+    )
+    for item in items:
+        summary = summary_lookup.get(item.get("gmail_id")) if item.get("gmail_id") else None
+        if summary:
+            item["summary"] = summary.summary
+            if summary.generated_at:
+                item["summary_generated_at"] = summary.generated_at
     return {
         "items": items,
         "next_page_token": response.get("nextPageToken"),
@@ -759,78 +1062,9 @@ async def get_message(gmail_id: str, mailbox_email: Optional[str] = None, user=D
     if not mailbox:
         raise HTTPException(status_code=400, detail="mailbox_email is required.")
     service = gmail_service_factory(mailbox)
-    metadata_only = False
-    permission_warning = ""
-    try:
-        message = (
-            service.users()
-            .messages()
-            .get(userId=mailbox, id=gmail_id, format="full")
-            .execute()
-        )
-    except HttpError as he:  # type: ignore
-        status = getattr(getattr(he, "resp", None), "status", 500)
-        raw = getattr(he, "content", b"")
-        try:
-            detail = raw.decode("utf-8") if isinstance(raw, (bytes, bytearray)) else str(raw)
-        except Exception:
-            detail = str(he)
-        msg = detail or str(he)
-        lowered = msg.lower()
-        if status == 403 and "metadata scope" in lowered:
-            try:
-                message = (
-                    service.users()
-                    .messages()
-                    .get(
-                        userId=mailbox,
-                        id=gmail_id,
-                        format="metadata",
-                        metadataHeaders=[
-                            "From",
-                            "To",
-                            "Subject",
-                            "Date",
-                            "Reply-To",
-                            "Message-ID",
-                            "References",
-                        ],
-                    )
-                    .execute()
-                )
-                metadata_only = True
-                permission_warning = (
-                    "Mailbox token only grants gmail.metadata. Re-consent with gmail.readonly or gmail.modify to view full content."
-                )
-            except HttpError:
-                raise HTTPException(
-                    status_code=403,
-                    detail=(
-                        "Gmail permission error. Token may lack required scopes or be invalid. "
-                        "Re-consent locally or update domain-wide delegation scopes. Details: " + msg
-                    ),
-                )
-        elif (
-            status == 403
-            or "insufficientPermissions" in msg
-            or "insufficient authentication scopes" in msg
-            or "invalid_scope" in msg
-            or "unauthorized_client" in msg
-        ):
-            raise HTTPException(
-                status_code=403,
-                detail=(
-                    "Gmail permission error. Token may lack required scopes or be invalid. "
-                    "Re-consent locally or update domain-wide delegation scopes. Details: " + msg
-                ),
-            )
-        else:
-            raise HTTPException(status_code=500, detail=f"Failed to fetch message: {msg}")
-    headers = _extract_headers_from_metadata(message)
-    text_body, html_body = _extract_bodies(message.get("payload", {}))
-    if metadata_only:
-        text_body = message.get("snippet", "") or text_body
-        html_body = ""
+    message, headers, text_body, html_body, metadata_only, permission_warning = _load_message_payload(
+        service, mailbox, gmail_id
+    )
     return {
         "gmail_id": message.get("id", gmail_id),
         "thread_id": message.get("threadId", ""),
@@ -840,6 +1074,38 @@ async def get_message(gmail_id: str, mailbox_email: Optional[str] = None, user=D
         "body_html": html_body,
         "metadata_only": metadata_only,
         "permission_warning": permission_warning,
+    }
+
+
+@app.get("/api/messages/{gmail_id}/summary")
+async def get_message_summary(
+    gmail_id: str,
+    mailbox_email: Optional[str] = None,
+    force: bool = False,
+    user=Depends(get_current_user),
+):
+    mailbox = (mailbox_email or user["email"]).strip()
+    if not mailbox:
+        raise HTTPException(status_code=400, detail="mailbox_email is required.")
+    if not force:
+        cached = state_store.get_message_summary(gmail_id=gmail_id, mailbox_email=mailbox)
+        if cached:
+            return {
+                "gmail_id": cached.gmail_id,
+                "mailbox_email": cached.mailbox_email,
+                "summary": cached.summary,
+                "model": cached.model,
+                "generated_at": cached.generated_at,
+                "cached": True,
+            }
+    record = _generate_message_summary(mailbox, gmail_id)
+    return {
+        "gmail_id": record.gmail_id,
+        "mailbox_email": record.mailbox_email,
+        "summary": record.summary,
+        "model": record.model,
+        "generated_at": record.generated_at,
+        "cached": False,
     }
 
 
@@ -853,56 +1119,7 @@ async def reply_message(gmail_id: str, payload: ReplyPayload = Body(...), user=D
         raise HTTPException(status_code=400, detail="body_text is required.")
 
     service = gmail_service_factory(mailbox)
-    try:
-        original = (
-            service.users()
-            .messages()
-            .get(userId=mailbox, id=gmail_id, format="full")
-            .execute()
-        )
-    except HttpError as he:  # type: ignore
-        status = getattr(getattr(he, "resp", None), "status", 500)
-        raw = getattr(he, "content", b"")
-        try:
-            detail = raw.decode("utf-8") if isinstance(raw, (bytes, bytearray)) else str(raw)
-        except Exception:
-            detail = str(he)
-        msg = detail or str(he)
-        lowered = msg.lower()
-        if status == 403 and "metadata scope" in lowered:
-            try:
-                original = (
-                    service.users()
-                    .messages()
-                    .get(
-                        userId=mailbox,
-                        id=gmail_id,
-                        format="metadata",
-                        metadataHeaders=[
-                            "From",
-                            "To",
-                            "Subject",
-                            "Date",
-                            "Reply-To",
-                            "Message-ID",
-                            "References",
-                        ],
-                    )
-                    .execute()
-                )
-            except HttpError:
-                raise HTTPException(
-                    status_code=403,
-                    detail=(
-                        "Gmail permission error. Token may lack required scopes or be invalid. "
-                        "Re-consent locally or update domain-wide delegation scopes. Details: " + msg
-                    ),
-                )
-        else:
-            raise HTTPException(status_code=500, detail=f"Failed to fetch original message: {msg}")
-    except Exception as exc:  # pragma: no cover
-        raise HTTPException(status_code=500, detail=str(exc))
-    headers = _extract_headers_from_metadata(original)
+    original, headers, _, _, _, _ = _load_message_payload(service, mailbox, gmail_id)
     thread_id = original.get("threadId")
     orig_subject = headers.get("subject", "")
     orig_msg_id = headers.get("message-id", "")
@@ -965,6 +1182,21 @@ async def reply_message(gmail_id: str, payload: ReplyPayload = Body(...), user=D
     return {"status": "sent", "id": sent.get("id"), "thread_id": sent.get("threadId")}
 
 
+@app.post("/api/messages/{gmail_id}/respond")
+async def draft_response(
+    gmail_id: str,
+    payload: Optional[MailboxPayload] = Body(default=None),
+    user=Depends(get_current_user),
+):
+    mailbox_value = payload.mailbox_email if payload else None
+    mailbox = (mailbox_value or user["email"]).strip()
+    if not mailbox:
+        raise HTTPException(status_code=400, detail="mailbox_email is required.")
+    draft = _generate_reply_draft(mailbox, gmail_id)
+    model_used = os.getenv("OPENROUTER_MODEL") or LLM_DEFAULT_MODEL
+    return {"gmail_id": gmail_id, "mailbox_email": mailbox, "draft": draft, "model": model_used}
+
+
 @app.post("/api/messages/{gmail_id}/archive")
 async def archive_message(gmail_id: str, payload: MailboxPayload = Body(...), user=Depends(get_current_user)):
     mailbox = (payload.mailbox_email or user["email"]).strip()
@@ -1022,6 +1254,11 @@ async def delete_message(gmail_id: str, payload: MailboxPayload = Body(...), use
         ):
             raise HTTPException(status_code=403, detail="Gmail delete permission missing or token invalid. " + msg)
         raise HTTPException(status_code=500, detail=f"Failed to delete: {msg}")
+    try:
+        state_store.delete_message_summary(gmail_id=gmail_id, mailbox_email=mailbox)
+    except Exception:
+        # Cache cleanup best-effort; don't block on failures.
+        pass
     return {"status": "deleted", "gmail_id": gmail_id}
 
 

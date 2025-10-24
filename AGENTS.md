@@ -13,7 +13,7 @@ Architecture
 - Notifications `telegram_notify.py`: Thin Telegram Bot API wrapper with optional interactive callback support.
 - LLM client `query_LLM.py`: Single-turn request to OpenRouter. Expects strict JSON from models. Requires OpenRouter API key. Default model: `openai/gpt-5` (override via `OPENROUTER_MODEL`).
 - Web UI `static/`: Login (GIS), run batch cleanup, view summaries, and submit feedback that creates criteria.
-- Web UI `static/`: Login (GIS), run batch cleanup, view summaries, browse messages (Inbox, Requires Response, Should Read), view full email text, reply, archive, and delete.
+- Web UI `static/`: Login (GIS), run batch cleanup, view AI summaries, browse messages (Inbox, Requires Response, Should Read), render full email bodies (HTML + text), generate draft replies, reply, archive, and delete.
 
 Configuration
 - Preferred configuration lives in `config.py`. Environment variables of the same names always override. Optional `keys.py` can provide `telegram_token`, `telegram_chat_id`, and `OPENROUTER_API_Key`. It also supports `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` (the app will read these if not set in env/config), plus optional `GOOGLE_OAUTH_CLIENT_ID` and deploy helpers like `GCP_PROJECT_ID` and `GCP_SERVICE_ACCOUNT_KEY_FILE`.
@@ -91,7 +91,9 @@ Endpoints (FastAPI)
 - `POST /cron/refresh`, `POST /cron/digest` — Unauthenticated cron-friendly aliases.
 - `GET /api/messages?label=<inbox|requires_response|should_read|all>&max_results=<n>&page_token=<t>` — List recent messages for the logged-in mailbox.
 - `GET /api/messages/{gmail_id}` — Fetch full message headers + text/html bodies.
+- `GET /api/messages/{gmail_id}/summary` — Return (or generate and cache) a brief LLM summary for the message.
 - `POST /api/messages/{gmail_id}/reply` — Send a reply in the same thread. Body: `{ body_text, to?, subject?, mailbox_email? }`.
+- `POST /api/messages/{gmail_id}/respond` — Generate an AI draft reply using recent Sent mail tone. Body: `{ mailbox_email? }` (optional).
 - `POST /api/messages/{gmail_id}/archive` — Remove `INBOX` label (archives). Body: `{ mailbox_email? }`.
 - `POST /api/messages/{gmail_id}/delete` — Delete the message. Body: `{ mailbox_email? }`.
 
@@ -162,7 +164,7 @@ File-by-File Map
 - `run_cleanup.py` — One-shot CLI to process inbox batches with optional Telegram confirmations.
 - `ship_and_deploy.py` — Git add/commit/push plus Cloud Run deploy in one command.
 - `static/index.html`, `static/app.js`, `static/styles.css` — Web console for login, batch cleanup, and feedback/criteria management.
-- `supabase_state.py` — Supabase REST store and in-memory fallback; logs messages, alerts, and mailbox checkpoints.
+- `supabase_state.py` — Supabase REST store and in-memory fallback; logs messages, alerts, mailbox checkpoints, and caches viewer summaries in the `messages` table under `state='summary'`.
 - `telegram_notify.py` — Telegram Bot API helpers: send message, get updates, handle callback queries, and wait for selection.
 - `.github/workflows/deploy.yml` — CI/CD pipeline to Cloud Run on push to `main`.
 - `verify_e2e.py` — End-to-end deploy + validation helper with Pub/Sub and Supabase checks.
@@ -173,6 +175,7 @@ What Future Agents Should Know
 - Do not log secrets, tokens, or raw ID tokens. The UI sends Google ID tokens; server validates against `GOOGLE_OAUTH_CLIENT_ID`.
 - Gmail scopes: Changing scopes requires a new consent/token; prefer adding via `GMAIL_EXTRA_SCOPES` when unavoidable.
 - If adding features that persist data, extend Supabase tables and update both `SupabaseStateStore` and the docs.
+- Viewer summaries are cached in Supabase `messages` rows with `state='summary'`; keep that convention so clean-up (including delete) can purge them reliably. Summaries and auto-draft responses expect plain-text output from the LLM (no Markdown or code fences).
 - For tests and local validation, prefer using `verify_e2e.py` or dry runs. Avoid writing broad integration tests that call external APIs unless feature work requires it.
 - please update this file AGENTS.md after all calls if anything has changed. This file AGENTS.md should remain up to date, anything changed should be reflected in this file and this file should remain up to date.
 
@@ -228,6 +231,7 @@ Updates
 - 2025-10-19: E2E script enhancement. `verify_e2e.py` now accepts `--push-endpoint` to avoid resetting Pub/Sub to the default Cloud Run URL when using a custom domain. Example: `python3 verify_e2e.py --key-file json_keys/owner_google_service_account_key.json --region us-central1 --service email-triage --subscription email-triage-push --email <acct> --skip-deploy --push-endpoint https://inboximp.com/gmail/push`.
 - 2025-10-19: Viewer integration + metadata-safe filters. `/api/messages` now resolves custom labels to their Gmail IDs instead of using the search `q` parameter, so tokens that only have `gmail.metadata` no longer fail with "Metadata scope does not support 'q' parameter". Cleanup batch results show counts plus viewer shortcuts instead of separate message cards; the viewer auto-loads the relevant label. Files touched: `app.py`, `static/index.html`, `static/app.js`, `static/styles.css`.
 - 2025-10-20: Viewer metadata fallback. The `/api/messages/{id}` endpoint now catches metadata-scope-only tokens and returns the snippet with a warning instead of a hard 403. The UI surfaces the warning inline. Reply endpoint reuses the metadata fallback so users can still respond even if full bodies are blocked. Files touched: `app.py`, `static/app.js`, `static/styles.css`.
+- 2025-10-20: Viewer summaries + AI drafts. `/api/messages/{id}/summary` generates and caches short LLM summaries per message (stored in Supabase `messages.state='summary'` and cleared on delete). The UI shows the summary on load and falls back gracefully if generation fails. Added `/api/messages/{id}/respond` to produce a draft reply using recent Sent mail to match tone; viewer exposes a “Draft reply” button that pre-fills the reply box. HTML bodies now render inline instead of showing “(no text body)”. Files touched: `app.py`, `supabase_state.py`, `static/app.js`, `static/styles.css`.
 
 Behavioral Notes
 - UI batch runs: one batch only, no Telegram. Call again to process the next batch.

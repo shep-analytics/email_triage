@@ -233,6 +233,26 @@ button.danger:hover {
   color: #1f2937;
 }
 
+.message-summary .summary-label {
+  font-weight: 600;
+  margin-right: 4px;
+}
+
+.message-summary.loading .summary-text {
+  color: #6b7280;
+  font-style: italic;
+}
+
+.message-summary.error {
+  color: #b91c1c;
+}
+
+.message-snippet {
+  font-size: 13px;
+  margin: 0;
+  color: #6b7280;
+}
+
 .message-reason {
   font-size: 12px;
   color: #6b7280;
@@ -275,6 +295,32 @@ button.danger:hover {
   word-break: break-word;
   margin: 0;
   font-size: 13px;
+}
+
+.viewer-html {
+  font-size: 13px;
+  color: #111827;
+  line-height: 1.55;
+  margin-bottom: 12px;
+}
+
+.viewer-html p {
+  margin: 0 0 10px;
+}
+
+.viewer-html ul,
+.viewer-html ol {
+  margin: 0 0 10px 18px;
+}
+
+.viewer-text {
+  margin-top: 8px !important;
+}
+
+.viewer-empty {
+  color: #6b7280;
+  font-size: 13px;
+  margin: 0;
 }
 
 .viewer-warning {

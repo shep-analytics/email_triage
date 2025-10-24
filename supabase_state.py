@@ -1,7 +1,7 @@
 import json
 import os
 from dataclasses import dataclass
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Iterable, Optional
 
 import requests
 
@@ -15,6 +15,15 @@ class MailboxState:
     email: str
     history_id: Optional[str] = None
     watch_expiration: Optional[int] = None
+
+
+@dataclass
+class MessageSummary:
+    gmail_id: str
+    mailbox_email: str
+    summary: str
+    model: Optional[str] = None
+    generated_at: Optional[str] = None
 
 
 class BaseStateStore:
@@ -52,6 +61,27 @@ class BaseStateStore:
         """Mark a batch of queued alerts as sent."""
         raise NotImplementedError
 
+    # --- Message summaries -------------------------------------------------
+
+    def get_message_summary(self, *, gmail_id: str, mailbox_email: str) -> Optional[MessageSummary]:
+        raise NotImplementedError
+
+    def get_message_summaries(self, *, mailbox_email: str, gmail_ids: Iterable[str]) -> Dict[str, MessageSummary]:
+        raise NotImplementedError
+
+    def upsert_message_summary(
+        self,
+        *,
+        gmail_id: str,
+        mailbox_email: str,
+        summary: str,
+        model: Optional[str] = None,
+    ) -> MessageSummary:
+        raise NotImplementedError
+
+    def delete_message_summary(self, *, gmail_id: str, mailbox_email: str) -> None:
+        raise NotImplementedError
+
 
 class SupabaseStateStore(BaseStateStore):
     """
@@ -76,6 +106,10 @@ class SupabaseStateStore(BaseStateStore):
             "Content-Type": "application/json",
             "Prefer": "return=representation",
         }
+
+    @staticmethod
+    def _summary_state() -> str:
+        return "summary"
 
     def _rest(self, path: str) -> str:
         return f"{self.url}/rest/v1/{path.lstrip('/')}"
@@ -192,6 +226,93 @@ class SupabaseStateStore(BaseStateStore):
             )
             response.raise_for_status()
 
+    # --- Message summaries -------------------------------------------------
+
+    def get_message_summary(self, *, gmail_id: str, mailbox_email: str) -> Optional[MessageSummary]:
+        items = self.get_message_summaries(mailbox_email=mailbox_email, gmail_ids=[gmail_id])
+        return items.get(gmail_id)
+
+    def get_message_summaries(self, *, mailbox_email: str, gmail_ids: Iterable[str]) -> Dict[str, MessageSummary]:
+        ids = [gid for gid in gmail_ids if gid]
+        if not ids:
+            return {}
+        params = {
+            "select": "gmail_id,mailbox_email,decision_json,processed_at",
+            "mailbox_email": f"eq.{mailbox_email}",
+            "state": f"eq.{self._summary_state()}",
+            "gmail_id": f"in.({','.join(ids)})",
+            "order": "processed_at.desc",
+        }
+        response = self.session.get(self._rest("messages"), params=params, headers=self._headers)
+        response.raise_for_status()
+        results: Dict[str, MessageSummary] = {}
+        for row in response.json() or []:
+            decision = row.get("decision_json") or {}
+            summary_text = decision.get("summary") or decision.get("summary_text")
+            if not summary_text:
+                continue
+            gmail_id = row.get("gmail_id")
+            if not gmail_id:
+                continue
+            if gmail_id in results:
+                continue  # keep the most recent entry from ordering
+            results[gmail_id] = MessageSummary(
+                gmail_id=gmail_id,
+                mailbox_email=row.get("mailbox_email", mailbox_email),
+                summary=summary_text,
+                model=decision.get("model"),
+                generated_at=row.get("processed_at"),
+            )
+        return results
+
+    def upsert_message_summary(
+        self,
+        *,
+        gmail_id: str,
+        mailbox_email: str,
+        summary: str,
+        model: Optional[str] = None,
+    ) -> MessageSummary:
+        # Remove any prior cached summary to avoid duplicates.
+        self.delete_message_summary(gmail_id=gmail_id, mailbox_email=mailbox_email)
+        payload = {
+            "gmail_id": gmail_id,
+            "mailbox_email": mailbox_email,
+            "decision_json": {
+                "summary": summary,
+                "model": model,
+                "source": "viewer_summary",
+            },
+            "state": self._summary_state(),
+        }
+        response = self.session.post(
+            self._rest("messages"),
+            headers={**self._headers, "Prefer": "return=representation"},
+            data=json.dumps(payload),
+        )
+        response.raise_for_status()
+        body = response.json()[0]
+        decision = body.get("decision_json") or {}
+        return MessageSummary(
+            gmail_id=body.get("gmail_id", gmail_id),
+            mailbox_email=body.get("mailbox_email", mailbox_email),
+            summary=decision.get("summary", summary),
+            model=decision.get("model", model),
+            generated_at=body.get("processed_at"),
+        )
+
+    def delete_message_summary(self, *, gmail_id: str, mailbox_email: str) -> None:
+        response = self.session.delete(
+            self._rest("messages"),
+            params={
+                "gmail_id": f"eq.{gmail_id}",
+                "mailbox_email": f"eq.{mailbox_email}",
+                "state": f"eq.{self._summary_state()}",
+            },
+            headers=self._headers,
+        )
+        response.raise_for_status()
+
 
 class NullStateStore(BaseStateStore):
     """
@@ -202,6 +323,7 @@ class NullStateStore(BaseStateStore):
         self.mailboxes: Dict[str, MailboxState] = {}
         self.decisions: Dict[str, Dict[str, Any]] = {}
         self.alerts: Dict[str, Dict[str, Any]] = {}
+        self.summaries: Dict[str, MessageSummary] = {}
 
     def get_mailbox(self, email: str) -> Optional[MailboxState]:
         return self.mailboxes.get(email)
@@ -250,6 +372,41 @@ class NullStateStore(BaseStateStore):
             key = f"{mailbox_email}:{gmail_id}"
             if key in self.alerts:
                 self.alerts[key]["status"] = "sent"
+
+    # --- Message summaries -------------------------------------------------
+
+    def get_message_summary(self, *, gmail_id: str, mailbox_email: str) -> Optional[MessageSummary]:
+        return self.summaries.get(f"{mailbox_email}:{gmail_id}")
+
+    def get_message_summaries(self, *, mailbox_email: str, gmail_ids: Iterable[str]) -> Dict[str, MessageSummary]:
+        results: Dict[str, MessageSummary] = {}
+        for gid in gmail_ids:
+            if not gid:
+                continue
+            summary = self.get_message_summary(gmail_id=gid, mailbox_email=mailbox_email)
+            if summary:
+                results[gid] = summary
+        return results
+
+    def upsert_message_summary(
+        self,
+        *,
+        gmail_id: str,
+        mailbox_email: str,
+        summary: str,
+        model: Optional[str] = None,
+    ) -> MessageSummary:
+        record = MessageSummary(
+            gmail_id=gmail_id,
+            mailbox_email=mailbox_email,
+            summary=summary,
+            model=model,
+        )
+        self.summaries[f"{mailbox_email}:{gmail_id}"] = record
+        return record
+
+    def delete_message_summary(self, *, gmail_id: str, mailbox_email: str) -> None:
+        self.summaries.pop(f"{mailbox_email}:{gmail_id}", None)
 
 
 def get_state_store(url: Optional[str] = None, service_role_key: Optional[str] = None) -> BaseStateStore:
