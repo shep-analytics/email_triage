@@ -1048,12 +1048,14 @@ async def list_messages(
             }
         )
     summary_lookup: Dict[str, MessageSummary] = {}
+    summary_error: Optional[str] = None
     try:
         summary_lookup = state_store.get_message_summaries(
             mailbox_email=mailbox,
             gmail_ids=[item.get("gmail_id") for item in items],
         )
     except Exception as exc:  # noqa: BLE001 - degrade gracefully if cache unavailable
+        summary_error = str(exc)
         logger.warning("Failed to fetch cached summaries for %s: %s", mailbox, exc)
     for item in items:
         summary = summary_lookup.get(item.get("gmail_id")) if item.get("gmail_id") else None
@@ -1061,6 +1063,8 @@ async def list_messages(
             item["summary"] = summary.summary
             if summary.generated_at:
                 item["summary_generated_at"] = summary.generated_at
+        elif summary_error:
+            item["summary_error"] = summary_error
     return {
         "items": items,
         "next_page_token": response.get("nextPageToken"),
@@ -1100,7 +1104,11 @@ async def get_message_summary(
     if not mailbox:
         raise HTTPException(status_code=400, detail="mailbox_email is required.")
     if not force:
-        cached = state_store.get_message_summary(gmail_id=gmail_id, mailbox_email=mailbox)
+        cached = None
+        try:
+            cached = state_store.get_message_summary(gmail_id=gmail_id, mailbox_email=mailbox)
+        except Exception as exc:  # noqa: BLE001 - degrade gracefully
+            logger.warning("Failed to fetch cached summary for %s: %s", gmail_id, exc)
         if cached:
             return {
                 "gmail_id": cached.gmail_id,

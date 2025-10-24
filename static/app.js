@@ -881,10 +881,16 @@ function buildViewerCard(item) {
     state.summaries.set(card.dataset.gmailId, item.summary);
     summaryText.textContent = item.summary;
     summaryRow.classList.remove("loading");
+    summaryRow.classList.remove("error");
   } else {
     summaryRow.classList.add("loading");
     summaryRow.classList.remove("error");
-    summaryText.textContent = "Generating summary…";
+    if (item.summary_error) {
+      summaryRow.classList.add("error");
+      summaryText.textContent = item.summary_error;
+    } else {
+      summaryText.textContent = "Generating summary…";
+    }
     fetchMessageSummary(card.dataset.gmailId)
       .then((summary) => {
         summaryText.textContent = summary || "No summary available.";
@@ -892,7 +898,8 @@ function buildViewerCard(item) {
         summaryRow.classList.remove("error");
       })
       .catch((error) => {
-        summaryText.textContent = error?.message || "Failed to summarise.";
+        const message = error?.message || "Failed to summarise.";
+        summaryText.textContent = message;
         summaryRow.classList.remove("loading");
         summaryRow.classList.add("error");
       });

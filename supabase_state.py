@@ -108,8 +108,8 @@ class SupabaseStateStore(BaseStateStore):
         }
 
     @staticmethod
-    def _summary_state() -> str:
-        return "summary"
+    def _summary_source() -> str:
+        return "viewer_summary"
 
     def _rest(self, path: str) -> str:
         return f"{self.url}/rest/v1/{path.lstrip('/')}"
@@ -236,34 +236,35 @@ class SupabaseStateStore(BaseStateStore):
         ids = [gid for gid in gmail_ids if gid]
         if not ids:
             return {}
-        quoted_ids = ",".join(f'"{gid}"' for gid in ids)
-        params = {
-            "select": "gmail_id,mailbox_email,decision_json,processed_at",
-            "mailbox_email": f"eq.{mailbox_email}",
-            "state": f"eq.{self._summary_state()}",
-            "gmail_id": f"in.({quoted_ids})",
-            "order": "processed_at.desc",
-        }
-        response = self.session.get(self._rest("messages"), params=params, headers=self._headers)
-        response.raise_for_status()
         results: Dict[str, MessageSummary] = {}
-        for row in response.json() or []:
-            decision = row.get("decision_json") or {}
-            summary_text = decision.get("summary") or decision.get("summary_text")
-            if not summary_text:
-                continue
-            gmail_id = row.get("gmail_id")
-            if not gmail_id:
-                continue
-            if gmail_id in results:
-                continue  # keep the most recent entry from ordering
-            results[gmail_id] = MessageSummary(
-                gmail_id=gmail_id,
-                mailbox_email=row.get("mailbox_email", mailbox_email),
-                summary=summary_text,
-                model=decision.get("model"),
-                generated_at=row.get("processed_at"),
-            )
+        chunk_size = 20
+        for start in range(0, len(ids), chunk_size):
+            batch = ids[start : start + chunk_size]
+            or_filter = ",".join(f"gmail_id.eq.{gid}" for gid in batch)
+            params = {
+                "select": "gmail_id,mailbox_email,decision_json,processed_at",
+                "mailbox_email": f"eq.{mailbox_email}",
+                "decision_json->>source": f"eq.{self._summary_source()}",
+                "or": f"({or_filter})",
+                "order": "processed_at.desc",
+            }
+            response = self.session.get(self._rest("messages"), params=params, headers=self._headers)
+            response.raise_for_status()
+            for row in response.json() or []:
+                decision = row.get("decision_json") or {}
+                summary_text = decision.get("summary") or decision.get("summary_text")
+                if not summary_text:
+                    continue
+                gmail_id = row.get("gmail_id")
+                if not gmail_id or gmail_id in results:
+                    continue
+                results[gmail_id] = MessageSummary(
+                    gmail_id=gmail_id,
+                    mailbox_email=row.get("mailbox_email", mailbox_email),
+                    summary=summary_text,
+                    model=decision.get("model"),
+                    generated_at=row.get("processed_at"),
+                )
         return results
 
     def upsert_message_summary(
@@ -282,9 +283,8 @@ class SupabaseStateStore(BaseStateStore):
             "decision_json": {
                 "summary": summary,
                 "model": model,
-                "source": "viewer_summary",
+                "source": self._summary_source(),
             },
-            "state": self._summary_state(),
         }
         response = self.session.post(
             self._rest("messages"),
@@ -308,7 +308,7 @@ class SupabaseStateStore(BaseStateStore):
             params={
                 "gmail_id": f"eq.{gmail_id}",
                 "mailbox_email": f"eq.{mailbox_email}",
-                "state": f"eq.{self._summary_state()}",
+                "decision_json->>source": f"eq.{self._summary_source()}",
             },
             headers=self._headers,
         )
