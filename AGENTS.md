@@ -19,7 +19,7 @@ Configuration
 - Preferred configuration lives in `config.py`. Environment variables of the same names always override. Optional `keys.py` can provide `telegram_token`, `telegram_chat_id`, and `OPENROUTER_API_Key`. It also supports `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` (the app will read these if not set in env/config), plus optional `GOOGLE_OAUTH_CLIENT_ID` and deploy helpers like `GCP_PROJECT_ID` and `GCP_SERVICE_ACCOUNT_KEY_FILE`.
 - Important settings (via `config.py` or env):
   - `GMAIL_ACCOUNTS`: Comma-separated list of mailboxes to watch/clean.
-  - `GMAIL_CLIENT_SECRET_PATH`: Path to Google OAuth client JSON. For the web "Connect Gmail" flow this must be a Web application client JSON (contains top-level key `web`). Default now points to `json_keys/client_secret_web.json`. Env alias: `GMAIL_OAUTH_CLIENT_SECRET`.
+  - `GMAIL_CLIENT_SECRET_PATH`: Path to Google OAuth client JSON. For the web "Connect Gmail" flow this must be a Web application client JSON (contains top-level key `web`). Default now points to `json_keys/client.json`. Env alias: `GMAIL_OAUTH_CLIENT_SECRET`.
   - `GMAIL_OAUTH_TOKEN_DIR`: Directory with per-account token JSON files (default: `.gmail_tokens`).
   - `GMAIL_SERVICE_ACCOUNT_FILE`/`GMAIL_DELEGATED_USER`: Alternative auth using domain-wide delegation.
   - `GMAIL_TOPIC_NAME`: Pub/Sub topic for Gmail push.
