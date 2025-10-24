@@ -181,6 +181,13 @@ def gcloud_setup(key_path: Path, project_id: str) -> None:
     run(["gcloud", "services", "enable", "run.googleapis.com", "pubsub.googleapis.com"])  # gmail api not needed for Cloud Run
 
 
+def gcloud_setup_active(project_id: str) -> None:
+    """Setup gcloud using the currently active gcloud authentication."""
+    run(["gcloud", "config", "set", "project", project_id])
+    # Ensure required services are enabled
+    run(["gcloud", "services", "enable", "run.googleapis.com", "pubsub.googleapis.com"])
+
+
 def build_and_deploy(service: str, region: str, project_id: str) -> str:
     image = f"gcr.io/{project_id}/{service}"
     # Build with Cloud Build
@@ -479,7 +486,8 @@ def call_digest(base_url: str) -> Dict[str, Any]:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Verify end-to-end triage deployment")
-    parser.add_argument("--key-file", default="email-assistant-service-key.json")
+    parser.add_argument("--key-file", default="email-assistant-service-key.json", help="Path to service account key JSON (or use --use-active-gcloud)")
+    parser.add_argument("--use-active-gcloud", action="store_true", help="Use currently logged-in gcloud account (skip key auth)")
     parser.add_argument("--region", default="us-central1")
     parser.add_argument("--service", default="email-triage")
     parser.add_argument("--subscription", default="email-triage-push")
@@ -496,13 +504,31 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     args = parse_args()
 
-    key_path = Path(args.key_file).expanduser().resolve()
-    if not key_path.exists():
-        print(f"Service account key not found: {key_path}", file=sys.stderr)
-        return 1
-
-    project_id = gcloud_project_from_key(key_path)
-    gcloud_setup(key_path, project_id)
+    # Determine project ID and setup gcloud
+    if args.use_active_gcloud:
+        # Use currently active gcloud authentication
+        try:
+            proc = subprocess.run(
+                ["gcloud", "config", "get-value", "project"],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            project_id = proc.stdout.strip()
+        except subprocess.CalledProcessError:
+            project_id = ""
+        if not project_id:
+            print("No project configured. Run: gcloud config set project <PROJECT_ID> or provide --key-file.", file=sys.stderr)
+            return 1
+        gcloud_setup_active(project_id)
+    else:
+        # Use service account key file
+        key_path = Path(args.key_file).expanduser().resolve()
+        if not key_path.exists():
+            print(f"Service account key not found: {key_path}", file=sys.stderr)
+            return 1
+        project_id = gcloud_project_from_key(key_path)
+        gcloud_setup(key_path, project_id)
 
     if args.skip_deploy:
         # Read current URL
