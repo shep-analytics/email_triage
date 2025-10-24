@@ -759,6 +759,8 @@ async def get_message(gmail_id: str, mailbox_email: Optional[str] = None, user=D
     if not mailbox:
         raise HTTPException(status_code=400, detail="mailbox_email is required.")
     service = gmail_service_factory(mailbox)
+    metadata_only = False
+    permission_warning = ""
     try:
         message = (
             service.users()
@@ -774,7 +776,41 @@ async def get_message(gmail_id: str, mailbox_email: Optional[str] = None, user=D
         except Exception:
             detail = str(he)
         msg = detail or str(he)
-        if (
+        lowered = msg.lower()
+        if status == 403 and "metadata scope" in lowered:
+            try:
+                message = (
+                    service.users()
+                    .messages()
+                    .get(
+                        userId=mailbox,
+                        id=gmail_id,
+                        format="metadata",
+                        metadataHeaders=[
+                            "From",
+                            "To",
+                            "Subject",
+                            "Date",
+                            "Reply-To",
+                            "Message-ID",
+                            "References",
+                        ],
+                    )
+                    .execute()
+                )
+                metadata_only = True
+                permission_warning = (
+                    "Mailbox token only grants gmail.metadata. Re-consent with gmail.readonly or gmail.modify to view full content."
+                )
+            except HttpError:
+                raise HTTPException(
+                    status_code=403,
+                    detail=(
+                        "Gmail permission error. Token may lack required scopes or be invalid. "
+                        "Re-consent locally or update domain-wide delegation scopes. Details: " + msg
+                    ),
+                )
+        elif (
             status == 403
             or "insufficientPermissions" in msg
             or "insufficient authentication scopes" in msg
@@ -788,9 +824,13 @@ async def get_message(gmail_id: str, mailbox_email: Optional[str] = None, user=D
                     "Re-consent locally or update domain-wide delegation scopes. Details: " + msg
                 ),
             )
-        raise HTTPException(status_code=500, detail=f"Failed to fetch message: {msg}")
+        else:
+            raise HTTPException(status_code=500, detail=f"Failed to fetch message: {msg}")
     headers = _extract_headers_from_metadata(message)
     text_body, html_body = _extract_bodies(message.get("payload", {}))
+    if metadata_only:
+        text_body = message.get("snippet", "") or text_body
+        html_body = ""
     return {
         "gmail_id": message.get("id", gmail_id),
         "thread_id": message.get("threadId", ""),
@@ -798,6 +838,8 @@ async def get_message(gmail_id: str, mailbox_email: Optional[str] = None, user=D
         "snippet": message.get("snippet", ""),
         "body_text": text_body,
         "body_html": html_body,
+        "metadata_only": metadata_only,
+        "permission_warning": permission_warning,
     }
 
 
@@ -818,6 +860,46 @@ async def reply_message(gmail_id: str, payload: ReplyPayload = Body(...), user=D
             .get(userId=mailbox, id=gmail_id, format="full")
             .execute()
         )
+    except HttpError as he:  # type: ignore
+        status = getattr(getattr(he, "resp", None), "status", 500)
+        raw = getattr(he, "content", b"")
+        try:
+            detail = raw.decode("utf-8") if isinstance(raw, (bytes, bytearray)) else str(raw)
+        except Exception:
+            detail = str(he)
+        msg = detail or str(he)
+        lowered = msg.lower()
+        if status == 403 and "metadata scope" in lowered:
+            try:
+                original = (
+                    service.users()
+                    .messages()
+                    .get(
+                        userId=mailbox,
+                        id=gmail_id,
+                        format="metadata",
+                        metadataHeaders=[
+                            "From",
+                            "To",
+                            "Subject",
+                            "Date",
+                            "Reply-To",
+                            "Message-ID",
+                            "References",
+                        ],
+                    )
+                    .execute()
+                )
+            except HttpError:
+                raise HTTPException(
+                    status_code=403,
+                    detail=(
+                        "Gmail permission error. Token may lack required scopes or be invalid. "
+                        "Re-consent locally or update domain-wide delegation scopes. Details: " + msg
+                    ),
+                )
+        else:
+            raise HTTPException(status_code=500, detail=f"Failed to fetch original message: {msg}")
     except Exception as exc:  # pragma: no cover
         raise HTTPException(status_code=500, detail=str(exc))
     headers = _extract_headers_from_metadata(original)

@@ -798,8 +798,14 @@ function buildViewerCard(item) {
         const data = await apiFetch(`/api/messages/${encodeURIComponent(card.dataset.gmailId)}`);
         const content = document.createElement("div");
         content.className = "viewer-content";
+        if (data.permission_warning) {
+          const warning = document.createElement("div");
+          warning.className = "viewer-warning";
+          warning.textContent = data.permission_warning;
+          content.appendChild(warning);
+        }
         const text = document.createElement("pre");
-        text.textContent = data.body_text || "(no text body)";
+        text.textContent = data.body_text || data.snippet || "(no text body)";
         content.appendChild(text);
         bodyEl.innerHTML = "";
         bodyEl.appendChild(content);

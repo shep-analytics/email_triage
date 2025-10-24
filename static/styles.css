@@ -277,6 +277,16 @@ button.danger:hover {
   font-size: 13px;
 }
 
+.viewer-warning {
+  background: #fef3c7;
+  border: 1px solid #f59e0b;
+  color: #92400e;
+  padding: 8px 10px;
+  border-radius: 6px;
+  margin-bottom: 10px;
+  font-size: 13px;
+}
+
 .reply-box {
   border-top: 1px dashed #e5e7eb;
   padding-top: 10px;
