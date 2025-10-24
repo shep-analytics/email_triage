@@ -37,6 +37,7 @@ const batchSizeInput = document.getElementById("batch-size");
 const runCleanupBtn = document.getElementById("run-cleanup");
 const cancelCleanupBtn = document.getElementById("cancel-cleanup");
 const logoutBtn = document.getElementById("logout-btn");
+const connectGmailBtn = document.getElementById("connect-gmail");
 const newCriterionForm = document.getElementById("new-criterion-form");
 const newCriterionText = document.getElementById("new-criterion-text");
 const criteriaListEl = document.getElementById("criteria-list");
@@ -113,6 +114,13 @@ function updateLoginHint() {
   if (allowed.length) {
     hintEl.textContent = `Allowed account: ${allowed.join(", ")}`;
   }
+  if (connectGmailBtn) {
+    if (state.config?.oauth_connect_enabled) {
+      connectGmailBtn.classList.remove("hidden");
+    } else {
+      connectGmailBtn.classList.add("hidden");
+    }
+  }
 }
 
 function setupEventHandlers() {
@@ -124,6 +132,9 @@ function setupEventHandlers() {
   }
   if (logoutBtn) {
     logoutBtn.addEventListener("click", handleLogout);
+  }
+  if (connectGmailBtn) {
+    connectGmailBtn.addEventListener("click", () => startGmailConnect().catch((e) => setStatus(cleanupStatus, e.message, true)));
   }
   if (refreshCriteriaBtn) {
     refreshCriteriaBtn.addEventListener("click", () => loadCriteria().catch(console.error));
@@ -208,6 +219,9 @@ function showMainView() {
   if (userEmailEl) {
     userEmailEl.textContent = email;
   }
+  if (state.config?.oauth_connect_enabled && connectGmailBtn) {
+    connectGmailBtn.classList.remove("hidden");
+  }
 }
 
 function handleLogout() {
@@ -223,9 +237,32 @@ function handleLogout() {
   setStatus(criteriaStatus, "", false);
   appView.classList.add("hidden");
   loginView.classList.remove("hidden");
+  if (connectGmailBtn) connectGmailBtn.classList.add("hidden");
   if (window.google?.accounts?.id) {
     window.google.accounts.id.disableAutoSelect();
   }
+}
+
+async function startGmailConnect() {
+  const resp = await apiFetch(`/oauth/start`);
+  const url = resp?.url;
+  if (!url) throw new Error("Server did not provide auth URL.");
+  const popup = window.open(url, "oauth", "width=520,height=650");
+  if (!popup) throw new Error("Popup blocked. Allow popups and try again.");
+  return new Promise((resolve) => {
+    const handler = (event) => {
+      try {
+        const data = event?.data;
+        if (data && data.status === "ok") {
+          window.removeEventListener("message", handler);
+          setStatus(cleanupStatus, "Gmail connected.", false);
+          fetch("/gmail/watch", { method: "POST" }).catch(() => {});
+          resolve();
+        }
+      } catch (_e) {}
+    };
+    window.addEventListener("message", handler);
+  });
 }
 
 async function handleRunCleanup() {

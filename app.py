@@ -14,12 +14,13 @@ import logging
 import re
 
 from fastapi import Depends, FastAPI, HTTPException, Request, Body
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse, StreamingResponse, HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from google.auth.transport import requests as google_auth_requests
 from google.oauth2 import id_token
 from pydantic import BaseModel, Field
+from google_auth_oauthlib.flow import Flow
 
 from gmail_processor import (
     CleanupCategory,
@@ -286,6 +287,11 @@ app = FastAPI()
 static_dir = Path(__file__).parent / "static"
 if static_dir.exists():
     app.mount("/static", StaticFiles(directory=static_dir), name="static")
+
+# In-memory store for OAuth states (web flow). Ephemeral by design; acceptable for
+# single-user or low-volume usage. For a production multi-instance setup, move
+# these to a durable store (e.g., Supabase) keyed by the GIS user email.
+_oauth_states: Dict[str, Dict[str, Any]] = {}
 
 
 def _authenticate(credentials: Optional[HTTPAuthorizationCredentials]) -> Dict[str, Any]:
@@ -731,11 +737,128 @@ async def serve_root():
 
 @app.get("/api/config")
 async def api_config():
+    # Determine whether a web OAuth client is available so the UI can show
+    # the "Connect Gmail" button.
+    oauth_available = False
+    try:
+        client_path = _config_value("GMAIL_CLIENT_SECRET_PATH", "GMAIL_OAUTH_CLIENT_SECRET")
+        if client_path and Path(client_path).exists():
+            # Basic heuristic: a web client JSON will contain a top-level key named "web"
+            try:
+                data = json.loads(Path(client_path).read_text(encoding="utf-8"))
+                oauth_available = bool(data.get("web"))
+            except Exception:
+                oauth_available = False
+    except Exception:
+        oauth_available = False
     return {
         "google_client_id": google_client_id,
         "allowed_emails": sorted(allowed_login_emails),
         "criteria_count": len(prompt_manager.list_criteria()),
+        "oauth_connect_enabled": oauth_available,
     }
+
+
+# -----------------------------
+# OAuth Web Flow (per-user connect)
+# -----------------------------
+
+def _oauth_client_secret_path() -> Path:
+    path_value = _config_value("GMAIL_CLIENT_SECRET_PATH", "GMAIL_OAUTH_CLIENT_SECRET")
+    path = Path(path_value) if path_value else None
+    if path and path.exists():
+        data = {}
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:  # pragma: no cover
+            data = {}
+        if "web" in data:  # require a web client for the redirect flow
+            return path
+    raise HTTPException(
+        status_code=500,
+        detail=(
+            "A Google OAuth client of type 'Web application' is required for web connect. "
+            "Place the client JSON at the path configured by GMAIL_CLIENT_SECRET_PATH."
+        ),
+    )
+
+
+def _oauth_redirect_uri(request: Request) -> str:
+    # Use the request host to build a correct callback URL for both local and Cloud Run
+    url = request.url_for("oauth_callback")
+    # FastAPI returns http on localhost; Cloud Run forwards https. Accept as-is.
+    return str(url)
+
+
+@app.get("/oauth/start")
+async def oauth_start(request: Request, scopes: Optional[str] = None, user=Depends(get_current_user)):
+    # Scopes: comma separated string or default to read/modify set.
+    requested_scopes = [s.strip() for s in (scopes or ",".join(GMAIL_READ_SCOPES)).split(",") if s.strip()]
+    client_secrets = _oauth_client_secret_path()
+    redirect_uri = _oauth_redirect_uri(request)
+    flow = Flow.from_client_secrets_file(str(client_secrets), scopes=requested_scopes, redirect_uri=redirect_uri)
+    auth_url, state = flow.authorization_url(
+        access_type="offline",
+        include_granted_scopes="true",
+        prompt="consent",
+    )
+    _oauth_states[state] = {"email": user["email"], "scopes": requested_scopes}
+    return JSONResponse({"url": auth_url})
+
+
+@app.get("/oauth/callback")
+async def oauth_callback(request: Request, state: Optional[str] = None):
+    if not state or state not in _oauth_states:
+        return HTMLResponse(
+            "<script>window.close();</script><p>Invalid or expired state. Please restart the connect flow.</p>",
+            status_code=400,
+        )
+    entry = _oauth_states.pop(state)
+    owner_email = entry.get("email")
+    client_secrets = _oauth_client_secret_path()
+    flow = Flow.from_client_secrets_file(str(client_secrets), scopes=entry.get("scopes") or GMAIL_READ_SCOPES, redirect_uri=_oauth_redirect_uri(request))
+    try:
+        flow.fetch_token(authorization_response=str(request.url))
+    except Exception as exc:  # noqa: BLE001
+        return HTMLResponse(f"<p>Token exchange failed: {html.escape(str(exc))}</p>", status_code=400)
+    creds = flow.credentials
+    try:
+        state_store.upsert_gmail_token(email=owner_email, token_json=creds.to_json())
+    except Exception:
+        # Best-effort persistence
+        pass
+    # Also save to local .gmail_tokens for dev fallback
+    try:
+        token_file = _token_file_for(owner_email)
+        token_file.write_text(creds.to_json(), encoding="utf-8")
+    except Exception:
+        pass
+    # Try to start a watch for this mailbox if topic is configured.
+    try:
+        topic_name = _config_value("GMAIL_TOPIC_NAME", "GMAIL_TOPIC_NAME")
+        if topic_name:
+            service = gmail_service_factory(owner_email)
+            start_watch(
+                service,
+                GmailAccount(user_id=owner_email, topic_name=topic_name, label_ids=("INBOX",)),
+            )
+    except Exception:  # pragma: no cover - best-effort
+        pass
+    # Return a tiny page that signals completion to the opener and closes itself
+    payload = json.dumps({"status": "ok", "email": owner_email})
+    html_page = f"""
+<!DOCTYPE html>
+<html><body>
+<script>
+  try {{
+    if (window.opener) {{ window.opener.postMessage({payload}, '*'); }}
+  }} catch (e) {{ }}
+  window.close();
+  document.write('Connected. You can close this window.');
+</script>
+</body></html>
+"""
+    return HTMLResponse(html_page)
 
 
 @app.post("/api/cleanup/run")
