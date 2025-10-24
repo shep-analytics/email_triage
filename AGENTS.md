@@ -19,7 +19,7 @@ Configuration
 - Preferred configuration lives in `config.py`. Environment variables of the same names always override. Optional `keys.py` can provide `telegram_token`, `telegram_chat_id`, and `OPENROUTER_API_Key`. It also supports `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` (the app will read these if not set in env/config), plus optional `GOOGLE_OAUTH_CLIENT_ID` and deploy helpers like `GCP_PROJECT_ID` and `GCP_SERVICE_ACCOUNT_KEY_FILE`.
 - Important settings (via `config.py` or env):
   - `GMAIL_ACCOUNTS`: Comma-separated list of mailboxes to watch/clean.
-  - `GMAIL_CLIENT_SECRET_PATH`: OAuth client JSON (desktop/web). Env alias: `GMAIL_OAUTH_CLIENT_SECRET`.
+  - `GMAIL_CLIENT_SECRET_PATH`: Path to Google OAuth client JSON. For the web "Connect Gmail" flow this must be a Web application client JSON (contains top-level key `web`). Default now points to `json_keys/client_secret_web.json`. Env alias: `GMAIL_OAUTH_CLIENT_SECRET`.
   - `GMAIL_OAUTH_TOKEN_DIR`: Directory with per-account token JSON files (default: `.gmail_tokens`).
   - `GMAIL_SERVICE_ACCOUNT_FILE`/`GMAIL_DELEGATED_USER`: Alternative auth using domain-wide delegation.
   - `GMAIL_TOPIC_NAME`: Pub/Sub topic for Gmail push.
@@ -27,7 +27,7 @@ Configuration
   - `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY` (required for real persistence; otherwise uses in-memory fallback).
   - `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` for alerts and batch confirmations.
   - `ALLOWED_LOGIN_EMAILS`, `GOOGLE_OAUTH_CLIENT_ID` for the web console’s GIS login.
-    - Set `ALLOWED_LOGIN_EMAILS=*` to allow any Google account to sign in (public mode). Otherwise provide an explicit allowlist.
+    - Set `ALLOWED_LOGIN_EMAILS=*` to allow any Google account to sign in (public mode). Otherwise provide an explicit allowlist. Default is `*`.
 - Optional runtime toggles:
   - `GMAIL_ALLOW_OAUTH_FLOW=1`: Permit interactive OAuth token flow if token missing/invalid.
   - `GMAIL_AUTO_REAUTH=1`: Attempt one interactive reauth on insufficient-scope errors.
@@ -203,7 +203,7 @@ Common Pitfalls
 Runbooks — Handy Commands
 - Bootstrap OAuth token: `python3 bootstrap_gmail_token.py you@example.com`
 - Headless/terminal OAuth: set `GMAIL_OAUTH_FLOW=console` or run `python3 bootstrap_gmail_token.py you@example.com --mode console` (prints a URL and device code). The script also upserts the token to Supabase if `keys.py` contains Supabase creds and the `gmail_tokens` table exists.
-- Web OAuth (for any user): ensure a Google OAuth Client of type "Web application" is at `GMAIL_CLIENT_SECRET_PATH` (must contain a top‑level `web` key). Authorized redirect URI must include `<RUN_URL>/oauth/callback` and `http://localhost:8000/oauth/callback` for local. After GIS login, click "Connect Gmail" in the UI to grant access.
+- Web OAuth (for any user): ensure a Google OAuth Client of type "Web application" is at `GMAIL_CLIENT_SECRET_PATH` (must contain a top‑level `web` key). Authorized redirect URI must include `<RUN_URL>/oauth/callback` and `http://localhost:8000/oauth/callback` for local. After GIS login, the UI now auto-opens the Connect popup (may be blocked; a "Connect Gmail" button is available).
 - Local API: `uvicorn app:app --reload`
 - Start/refresh watches: `curl -X POST http://localhost:8000/gmail/watch`
 - Dry-run LLM: `curl -X POST http://localhost:8000/dry-run -H 'Content-Type: application/json' -d '{"sender":"x@y","to":"me@y","subject":"Hi","snippet":"..."}'`
@@ -250,3 +250,6 @@ Behavioral Notes
 - UI batch runs: one batch only, no Telegram. Call again to process the next batch.
 - Programmatic cleanup `/gmail/cleanup`: unchanged defaults. Use `await_user_confirmation=true` to require Telegram “Continue/Stop” between batches, or `false` to auto-continue. It still sends Telegram batch summaries unless you override by passing `telegram_token`/`telegram_chat_id` as null values and set `notify_via_telegram=False` in code usage.
 - Fail-fast: If a batch has only errors, cleanup stops early and returns `stopped_early: true`.
+- 2025-10-24: Public login + web OAuth connect. Config now defaults to `ALLOWED_LOGIN_EMAILS = ["*"]` (any Google account). `GMAIL_CLIENT_SECRET_PATH` now points to `json_keys/client_secret_web.json` — place a Web application OAuth client there. The UI attempts to auto-start "Connect Gmail" after GIS sign-in and also exposes a button. The web OAuth flow requests `gmail.modify`, `gmail.readonly`, and `gmail.metadata`, stores tokens in Supabase and `.gmail_tokens/`, and auto-starts a Gmail watch for the new mailbox using the configured Pub/Sub topic.
+  - Important: Gmail read/modify scopes are “restricted” by Google. To allow any external user to authorize, you must publish the OAuth consent screen and complete restricted-scope verification for Gmail. Without verification, only test users can authorize and users may encounter blocked consent.
+  - Alternative for Workspace-only audiences: use Domain‑Wide Delegation (`GMAIL_SERVICE_ACCOUNT_FILE` + admin-approved scopes) so any user in your domain is supported without per-user consent. This does not work for consumer Gmail accounts.
