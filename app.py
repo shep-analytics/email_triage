@@ -84,7 +84,8 @@ def _configured_mailboxes() -> List[str]:
 
 def _allowed_login_emails() -> List[str]:
     if config and getattr(config, "ALLOWED_LOGIN_EMAILS", None):
-        return [addr.strip().lower() for addr in config.ALLOWED_LOGIN_EMAILS if addr.strip()]  # type: ignore[attr-defined]
+        items = [addr.strip().lower() for addr in config.ALLOWED_LOGIN_EMAILS if addr.strip()]  # type: ignore[attr-defined]
+        return items
     raw = os.getenv("ALLOWED_LOGIN_EMAILS", "")
     items = [item.strip().lower() for item in raw.split(",") if item.strip()]
     if items:
@@ -305,7 +306,7 @@ def _authenticate(credentials: Optional[HTTPAuthorizationCredentials]) -> Dict[s
     except ValueError as exc:
         raise HTTPException(status_code=401, detail=f"Invalid ID token: {exc}") from exc
     email = str(id_info.get("email", "")).lower()
-    if email not in allowed_login_emails:
+    if "*" not in allowed_login_emails and email not in allowed_login_emails:
         raise HTTPException(status_code=403, detail="Email not authorized.")
     return {"email": email, "claims": id_info}
 
