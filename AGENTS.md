@@ -89,6 +89,8 @@ Endpoints (FastAPI)
 - `GET /health` or `GET /healthz` — Health information (mailbox watch/checkpoint state, telegram, and store mode).
 - `POST /alerts/digest` — Sends grouped Telegram digests for queued “alert_today” items.
 - `POST /cron/refresh`, `POST /cron/digest` — Unauthenticated cron-friendly aliases.
+- `GET /oauth/start` — Begins per‑user Gmail OAuth web flow. Returns `{ url }` for a popup; uses the web client JSON at `GMAIL_CLIENT_SECRET_PATH`. Requires GIS auth.
+- `GET /oauth/callback` — OAuth redirect target. Exchanges the code, stores token (Supabase `gmail_tokens` when configured, plus `.gmail_tokens` fallback), starts a Gmail watch, and closes the popup.
 - `GET /api/messages?label=<inbox|requires_response|should_read|all>&max_results=<n>&page_token=<t>` — List recent messages for the logged-in mailbox.
 - `GET /api/messages/{gmail_id}` — Fetch full message headers + text/html bodies.
 - `GET /api/messages/{gmail_id}/summary` — Return (or generate and cache) a brief LLM summary for the message.
@@ -200,6 +202,7 @@ Common Pitfalls
 Runbooks — Handy Commands
 - Bootstrap OAuth token: `python3 bootstrap_gmail_token.py you@example.com`
 - Headless/terminal OAuth: set `GMAIL_OAUTH_FLOW=console` or run `python3 bootstrap_gmail_token.py you@example.com --mode console` (prints a URL and device code). The script also upserts the token to Supabase if `keys.py` contains Supabase creds and the `gmail_tokens` table exists.
+- Web OAuth (for any user): ensure a Google OAuth Client of type "Web application" is at `GMAIL_CLIENT_SECRET_PATH` (must contain a top‑level `web` key). Authorized redirect URI must include `<RUN_URL>/oauth/callback` and `http://localhost:8000/oauth/callback` for local. After GIS login, click "Connect Gmail" in the UI to grant access.
 - Local API: `uvicorn app:app --reload`
 - Start/refresh watches: `curl -X POST http://localhost:8000/gmail/watch`
 - Dry-run LLM: `curl -X POST http://localhost:8000/dry-run -H 'Content-Type: application/json' -d '{"sender":"x@y","to":"me@y","subject":"Hi","snippet":"..."}'`
