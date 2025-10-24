@@ -27,6 +27,7 @@ Configuration
   - `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY` (required for real persistence; otherwise uses in-memory fallback).
   - `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` for alerts and batch confirmations.
   - `ALLOWED_LOGIN_EMAILS`, `GOOGLE_OAUTH_CLIENT_ID` for the web console’s GIS login.
+    - Set `ALLOWED_LOGIN_EMAILS=*` to allow any Google account to sign in (public mode). Otherwise provide an explicit allowlist.
 - Optional runtime toggles:
   - `GMAIL_ALLOW_OAUTH_FLOW=1`: Permit interactive OAuth token flow if token missing/invalid.
   - `GMAIL_AUTO_REAUTH=1`: Attempt one interactive reauth on insufficient-scope errors.
