@@ -236,11 +236,12 @@ class SupabaseStateStore(BaseStateStore):
         ids = [gid for gid in gmail_ids if gid]
         if not ids:
             return {}
+        quoted_ids = ",".join(f'"{gid}"' for gid in ids)
         params = {
             "select": "gmail_id,mailbox_email,decision_json,processed_at",
             "mailbox_email": f"eq.{mailbox_email}",
             "state": f"eq.{self._summary_state()}",
-            "gmail_id": f"in.({','.join(ids)})",
+            "gmail_id": f"in.({quoted_ids})",
             "order": "processed_at.desc",
         }
         response = self.session.get(self._rest("messages"), params=params, headers=self._headers)
