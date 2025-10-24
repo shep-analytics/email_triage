@@ -10,6 +10,7 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 import base64
 import email.utils as email_utils
 import html
+import logging
 import re
 
 from fastapi import Depends, FastAPI, HTTPException, Request, Body
@@ -166,6 +167,9 @@ def _true(value: Optional[str]) -> bool:
 
 SUMMARY_BODY_CHAR_LIMIT = 4000
 SUMMARY_TARGET_SENT_EMAILS = 6
+
+
+logger = logging.getLogger(__name__)
 
 
 def gmail_service_factory(email: str, *, scopes=None):
@@ -600,12 +604,16 @@ def _generate_message_summary(mailbox: str, gmail_id: str) -> MessageSummary:
     if not summary_text:
         raise HTTPException(status_code=502, detail="LLM returned an empty summary.")
     model_used = os.getenv("OPENROUTER_MODEL") or LLM_DEFAULT_MODEL
-    return state_store.upsert_message_summary(
-        gmail_id=gmail_id,
-        mailbox_email=mailbox,
-        summary=summary_text,
-        model=model_used,
-    )
+    try:
+        return state_store.upsert_message_summary(
+            gmail_id=gmail_id,
+            mailbox_email=mailbox,
+            summary=summary_text,
+            model=model_used,
+        )
+    except Exception as exc:  # noqa: BLE001 - best-effort cache
+        logger.exception("Failed to persist summary for %s: %s", gmail_id, exc)
+        return MessageSummary(gmail_id=gmail_id, mailbox_email=mailbox, summary=summary_text, model=model_used)
 
 
 def _generate_reply_draft(mailbox: str, gmail_id: str) -> str:
@@ -1039,10 +1047,14 @@ async def list_messages(
                 "snippet": metadata.get("snippet", ""),
             }
         )
-    summary_lookup = state_store.get_message_summaries(
-        mailbox_email=mailbox,
-        gmail_ids=[item.get("gmail_id") for item in items],
-    )
+    summary_lookup: Dict[str, MessageSummary] = {}
+    try:
+        summary_lookup = state_store.get_message_summaries(
+            mailbox_email=mailbox,
+            gmail_ids=[item.get("gmail_id") for item in items],
+        )
+    except Exception as exc:  # noqa: BLE001 - degrade gracefully if cache unavailable
+        logger.warning("Failed to fetch cached summaries for %s: %s", mailbox, exc)
     for item in items:
         summary = summary_lookup.get(item.get("gmail_id")) if item.get("gmail_id") else None
         if summary:
