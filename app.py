@@ -43,6 +43,7 @@ except Exception:  # pragma: no cover
 from prompt_manager import PromptManager
 from supabase_state import BaseStateStore, MailboxState, MessageSummary, get_state_store
 from telegram_notify import send_telegram_message
+from logging_utils import configure_logging
 
 try:
     import config  # type: ignore
@@ -73,6 +74,19 @@ def _config_value(attr: str, env_name: str, default=None):
     if env_value not in (None, ""):
         return env_value
     return default
+
+
+def _gmail_client_secret_path_value() -> Optional[str]:
+    """
+    Return the Gmail OAuth client secret path, honoring both env names:
+    - GMAIL_CLIENT_SECRET_PATH (preferred)
+    - GMAIL_OAUTH_CLIENT_SECRET (legacy alias used in earlier builds)
+    Falls back to config.GMAIL_CLIENT_SECRET_PATH.
+    """
+    direct_env = os.getenv("GMAIL_CLIENT_SECRET_PATH")
+    if direct_env:
+        return direct_env
+    return _config_value("GMAIL_CLIENT_SECRET_PATH", "GMAIL_OAUTH_CLIENT_SECRET")
 
 
 def _configured_mailboxes() -> List[str]:
@@ -171,13 +185,14 @@ SUMMARY_BODY_CHAR_LIMIT = 4000
 SUMMARY_TARGET_SENT_EMAILS = 6
 
 
+ACTIVE_LOG_FILE = configure_logging()
 logger = logging.getLogger(__name__)
 
 
 def gmail_service_factory(email: str, *, scopes=None):
     service_account_file = _config_value("GMAIL_SERVICE_ACCOUNT_FILE", "GMAIL_SERVICE_ACCOUNT_FILE")
     delegated_user = _config_value("GMAIL_DELEGATED_USER", "GMAIL_DELEGATED_USER", email)
-    oauth_client_secret = _config_value("GMAIL_CLIENT_SECRET_PATH", "GMAIL_OAUTH_CLIENT_SECRET")
+    oauth_client_secret = _gmail_client_secret_path_value()
     scopes = scopes or GMAIL_READ_SCOPES
 
     if service_account_file:
@@ -285,6 +300,7 @@ processor = GmailProcessor(
 )
 
 app = FastAPI()
+app.state.log_file_path = ACTIVE_LOG_FILE
 static_dir = Path(__file__).parent / "static"
 if static_dir.exists():
     app.mount("/static", StaticFiles(directory=static_dir), name="static")
@@ -485,6 +501,18 @@ def _load_message_payload(service, mailbox: str, gmail_id: str) -> Tuple[Dict[st
         # Preserve whatever we have so the UI can fall back to the list-time snippet.
         text_body = message.get("snippet", "") or text_body
         html_body = ""
+        try:
+            credentials = getattr(getattr(service, "_http", None), "credentials", None)
+            scopes = sorted(set(getattr(credentials, "scopes", []) or []))
+            valid = getattr(credentials, "valid", None)
+            logger.warning(
+                "Gmail credentials for %s report scopes=%s (valid=%s) during metadata-only fallback.",
+                mailbox,
+                scopes or "(unknown)",
+                valid,
+            )
+        except Exception:
+            logger.debug("Unable to introspect Gmail credentials for %s during metadata fallback.", mailbox)
     return message, headers, text_body, html_body, metadata_only, permission_warning
 
 
@@ -767,12 +795,121 @@ async def api_config():
     }
 
 
+@app.get("/api/diagnostic/supabase")
+async def api_diagnostic_supabase(user=Depends(get_current_user)):
+    """
+    Diagnostic endpoint to check Supabase connectivity and gmail_tokens table access.
+    Only accessible to authenticated users.
+    """
+    import requests as req
+
+    results = {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "user_email": user.get("email"),
+        "supabase_config": {},
+        "table_tests": {},
+        "gmail_token_check": {},
+    }
+
+    # Check environment configuration
+    supabase_url = _config_value("SUPABASE_URL", "SUPABASE_URL")
+    supabase_key_present = bool(_config_value("SUPABASE_SERVICE_ROLE_KEY", "SUPABASE_SERVICE_ROLE_KEY"))
+
+    results["supabase_config"] = {
+        "url": supabase_url,
+        "url_configured": bool(supabase_url),
+        "service_key_configured": supabase_key_present,
+        "service_key_length": len(_config_value("SUPABASE_SERVICE_ROLE_KEY", "SUPABASE_SERVICE_ROLE_KEY") or "") if supabase_key_present else 0,
+    }
+
+    if not supabase_url or not supabase_key_present:
+        results["error"] = "Supabase credentials not configured"
+        return results
+
+    # Test table access
+    try:
+        headers = {
+            "apikey": _config_value("SUPABASE_SERVICE_ROLE_KEY", "SUPABASE_SERVICE_ROLE_KEY"),
+            "Authorization": f"Bearer {_config_value('SUPABASE_SERVICE_ROLE_KEY', 'SUPABASE_SERVICE_ROLE_KEY')}",
+        }
+
+        # Test 1: List tables
+        response = req.get(f"{supabase_url}/rest/v1/", headers=headers, timeout=10)
+        if response.status_code == 200:
+            swagger = response.json()
+            tables = [t for t in swagger.get("paths", {}).keys() if t != "/"]
+            results["table_tests"]["available_tables"] = tables
+            results["table_tests"]["gmail_tokens_in_schema"] = "/gmail_tokens" in tables
+        else:
+            results["table_tests"]["schema_check_error"] = f"Status {response.status_code}"
+
+        # Test 2: Query gmail_tokens table
+        response = req.get(
+            f"{supabase_url}/rest/v1/gmail_tokens",
+            params={"select": "email", "limit": 10},
+            headers=headers,
+            timeout=10
+        )
+
+        results["gmail_token_check"]["query_status"] = response.status_code
+
+        if response.status_code == 200:
+            tokens = response.json()
+            results["gmail_token_check"]["success"] = True
+            results["gmail_token_check"]["token_count"] = len(tokens)
+            results["gmail_token_check"]["emails"] = [t.get("email") for t in tokens]
+        elif response.status_code == 404:
+            results["gmail_token_check"]["success"] = False
+            results["gmail_token_check"]["error"] = "Table not found (404)"
+            try:
+                error_detail = response.json()
+                results["gmail_token_check"]["error_detail"] = error_detail
+            except Exception:
+                results["gmail_token_check"]["error_detail"] = response.text
+        else:
+            results["gmail_token_check"]["success"] = False
+            results["gmail_token_check"]["error"] = f"Unexpected status {response.status_code}"
+            results["gmail_token_check"]["response"] = response.text[:500]
+
+        # Test 3: Query for user's token specifically
+        user_email = user.get("email")
+        if user_email:
+            response = req.get(
+                f"{supabase_url}/rest/v1/gmail_tokens",
+                params={"email": f"eq.{user_email}", "select": "token_json", "limit": 1},
+                headers=headers,
+                timeout=10
+            )
+
+            if response.status_code == 200:
+                data = response.json()
+                if data:
+                    token_json = json.loads(data[0]["token_json"])
+                    scopes = token_json.get("scopes", [])
+                    results["gmail_token_check"]["user_token_found"] = True
+                    results["gmail_token_check"]["user_scopes"] = [s.replace("https://www.googleapis.com/auth/", "") for s in scopes]
+                    results["gmail_token_check"]["has_modify"] = any("gmail.modify" in s for s in scopes)
+                    results["gmail_token_check"]["has_readonly"] = any("gmail.readonly" in s for s in scopes)
+                    results["gmail_token_check"]["token_expiry"] = token_json.get("expiry")
+                else:
+                    results["gmail_token_check"]["user_token_found"] = False
+                    results["gmail_token_check"]["user_token_message"] = "Table accessible but no token for this user"
+            else:
+                results["gmail_token_check"]["user_token_error"] = f"Status {response.status_code}"
+
+    except Exception as e:
+        results["error"] = str(e)
+        results["error_type"] = type(e).__name__
+
+    return results
+
+
 # -----------------------------
 # OAuth Web Flow (per-user connect)
 # -----------------------------
 
 def _oauth_client_secret_path() -> Path:
-    path_value = _config_value("GMAIL_CLIENT_SECRET_PATH", "GMAIL_OAUTH_CLIENT_SECRET")
+    path_value = _gmail_client_secret_path_value()
     path = Path(path_value) if path_value else None
     if path and path.exists():
         data = {}
@@ -786,7 +923,8 @@ def _oauth_client_secret_path() -> Path:
         status_code=500,
         detail=(
             "A Google OAuth client of type 'Web application' is required for web connect. "
-            "Place the client JSON at the path configured by GMAIL_CLIENT_SECRET_PATH."
+            "Place the client JSON at the path configured by GMAIL_CLIENT_SECRET_PATH (or set env "
+            "GMAIL_OAUTH_CLIENT_SECRET to the same path)."
         ),
     )
 
@@ -794,8 +932,22 @@ def _oauth_client_secret_path() -> Path:
 def _oauth_redirect_uri(request: Request) -> str:
     # Use the request host to build a correct callback URL for both local and Cloud Run
     url = request.url_for("oauth_callback")
-    # FastAPI returns http on localhost; Cloud Run forwards https. Accept as-is.
-    return str(url)
+
+    # Cloud Run terminates SSL/TLS at the load balancer and forwards HTTP to the container.
+    # Check X-Forwarded-Proto header to determine the original scheme.
+    forwarded_proto = request.headers.get("x-forwarded-proto", "").lower()
+    if forwarded_proto == "https":
+        # Replace http with https for the redirect URI
+        redirect = str(url).replace("http://", "https://", 1)
+    else:
+        redirect = str(url)
+
+    # Relax oauthlib checks so local flows do not fail on default identity scopes or http://localhost.
+    os.environ.setdefault("OAUTHLIB_RELAX_TOKEN_SCOPE", "1")
+    # OAuthlib enforces HTTPS for web flows. Allow http://localhost during local dev.
+    if url.scheme == "http" and url.hostname in {"127.0.0.1", "localhost"}:
+        os.environ.setdefault("OAUTHLIB_INSECURE_TRANSPORT", "1")
+    return redirect
 
 
 @app.get("/oauth/start")
