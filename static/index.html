@@ -3,18 +3,30 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Email Triage Console</title>
-    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='48' y='8' rx='8' ry='8' fill='%231f2937'/%3E%3Cpath d='M8 16l24 16L56 16' stroke='%23ffffff' stroke-width='4' fill='none'/%3E%3C/svg%3E" />
+    <title>Inboximp Email Triage - AI-Powered Gmail Organization</title>
+    <meta name="description" content="Organize your Gmail inbox automatically with AI-powered classification. Prioritize important emails and clean up your inbox efficiently." />
+    <link rel="icon" href="/static/inboximp.png" />
     <link rel="stylesheet" href="/static/styles.css" />
     <script src="https://accounts.google.com/gsi/client" async defer></script>
   </head>
   <body>
     <div id="root">
       <section id="login-view" class="card">
-        <h1>Email Triage Console</h1>
-        <p>Sign in with Google to manage inbox cleanup.</p>
+        <div style="text-align: center; margin-bottom: 20px;">
+          <img src="/static/inboximp.png" alt="Inboximp Logo" style="width: 80px; height: 80px; margin-bottom: 12px;" />
+        </div>
+        <h1>Inboximp Email Triage</h1>
+        <p style="font-size: 16px; color: #4b5563; margin-bottom: 20px;">
+          AI-powered email organization for Gmail. Automatically classify and label your emails to keep your inbox organized.
+        </p>
         <div id="google-signin"></div>
-        <p class="hint">Only the configured Google account may access this console.</p>
+        <p class="hint">Sign in with your Google account to get started.</p>
+        <div style="margin-top: 24px; padding-top: 24px; border-top: 1px solid #e5e7eb; text-align: center;">
+          <p style="font-size: 13px; color: #6b7280; margin: 0 0 12px 0;">
+            By signing in, you agree to our <a href="/static/terms.html" style="color: #2563eb; text-decoration: none;">Terms of Service</a>
+            and <a href="/static/privacy.html" style="color: #2563eb; text-decoration: none;">Privacy Policy</a>.
+          </p>
+        </div>
       </section>
 
       <section id="app-view" class="hidden">
@@ -82,6 +94,17 @@
         </section>
       </section>
     </div>
+
+    <footer style="text-align: center; padding: 24px 16px; color: #6b7280; font-size: 13px;">
+      <p style="margin: 0 0 8px 0;">
+        <a href="/static/privacy.html" style="color: #2563eb; text-decoration: none; margin: 0 12px;">Privacy Policy</a>
+        <a href="/static/terms.html" style="color: #2563eb; text-decoration: none; margin: 0 12px;">Terms of Service</a>
+        <a href="mailto:support@inboximp.com" style="color: #2563eb; text-decoration: none; margin: 0 12px;">Contact</a>
+      </p>
+      <p style="margin: 0; color: #9ca3af;">
+        &copy; 2025 Inboximp Email Triage. All rights reserved.
+      </p>
+    </footer>
 
     <script type="module" src="/static/app.js"></script>
   </body>

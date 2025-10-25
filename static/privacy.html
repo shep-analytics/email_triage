@@ -1,0 +1,333 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Privacy Policy - Inboximp Email Triage</title>
+    <link rel="icon" href="/static/inboximp.png" />
+    <style>
+      :root {
+        font-family: "Inter", system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        background: #f4f6fb;
+        color: #1b1f3b;
+      }
+      body {
+        margin: 0;
+        padding: 0;
+        line-height: 1.6;
+      }
+      .container {
+        max-width: 800px;
+        margin: 0 auto;
+        padding: 32px 16px 48px;
+      }
+      .header {
+        background: #ffffff;
+        border-radius: 16px;
+        box-shadow: 0 12px 48px rgba(15, 23, 42, 0.12);
+        padding: 32px 28px;
+        margin-bottom: 24px;
+        text-align: center;
+      }
+      .header img {
+        width: 80px;
+        height: 80px;
+        margin-bottom: 16px;
+      }
+      .header h1 {
+        margin: 0 0 8px 0;
+        font-size: 32px;
+        color: #1b1f3b;
+      }
+      .header p {
+        margin: 0;
+        color: #6b7280;
+        font-size: 14px;
+      }
+      .content {
+        background: #ffffff;
+        border-radius: 16px;
+        box-shadow: 0 12px 48px rgba(15, 23, 42, 0.12);
+        padding: 32px 28px;
+      }
+      h2 {
+        color: #1b1f3b;
+        font-size: 24px;
+        margin-top: 32px;
+        margin-bottom: 12px;
+        border-bottom: 2px solid #e5e7eb;
+        padding-bottom: 8px;
+      }
+      h2:first-child {
+        margin-top: 0;
+      }
+      h3 {
+        color: #374151;
+        font-size: 18px;
+        margin-top: 24px;
+        margin-bottom: 8px;
+      }
+      p {
+        color: #4b5563;
+        margin-bottom: 16px;
+      }
+      ul, ol {
+        color: #4b5563;
+        margin-bottom: 16px;
+      }
+      li {
+        margin-bottom: 8px;
+      }
+      .footer {
+        margin-top: 24px;
+        padding: 16px;
+        text-align: center;
+      }
+      .footer a {
+        color: #2563eb;
+        text-decoration: none;
+        margin: 0 12px;
+      }
+      .footer a:hover {
+        text-decoration: underline;
+      }
+      .last-updated {
+        background: #eef2ff;
+        padding: 12px;
+        border-radius: 8px;
+        margin-bottom: 24px;
+        font-size: 14px;
+        color: #1e3a8a;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="container">
+      <div class="header">
+        <img src="/static/inboximp.png" alt="Inboximp Logo" />
+        <h1>Privacy Policy</h1>
+        <p>Inboximp Email Triage</p>
+      </div>
+
+      <div class="content">
+        <div class="last-updated">
+          <strong>Last Updated:</strong> October 24, 2025
+        </div>
+
+        <h2>Introduction</h2>
+        <p>
+          Inboximp Email Triage ("we", "our", or "the Service") is committed to protecting your privacy.
+          This Privacy Policy explains how we collect, use, disclose, and safeguard your information when
+          you use our AI-powered email organization service for Gmail.
+        </p>
+
+        <h2>What We Do</h2>
+        <p>
+          Inboximp Email Triage helps you automatically organize your Gmail inbox using AI-powered
+          classification. We read your emails, analyze them, and apply labels to help you prioritize
+          and manage your inbox more efficiently.
+        </p>
+
+        <h2>Information We Collect</h2>
+
+        <h3>Gmail Data</h3>
+        <ul>
+          <li><strong>Email Messages:</strong> Subject lines, sender information, message body content, metadata (dates, labels, etc.)</li>
+          <li><strong>Gmail Labels:</strong> Existing labels and labels we create</li>
+          <li><strong>Message IDs:</strong> Unique identifiers to track which emails we've processed</li>
+          <li><strong>Account Information:</strong> Your Gmail email address</li>
+        </ul>
+
+        <h3>Account Data</h3>
+        <ul>
+          <li>Google Account email address (used for authentication)</li>
+          <li>OAuth access tokens (encrypted and securely stored)</li>
+          <li>Classification preferences and custom criteria you set</li>
+        </ul>
+
+        <h2>How We Use Your Information</h2>
+
+        <h3>Primary Uses</h3>
+        <ul>
+          <li><strong>Email Classification:</strong> We analyze email content to determine appropriate labels and actions</li>
+          <li><strong>Label Management:</strong> We apply labels to your Gmail messages based on AI classification</li>
+          <li><strong>Service Improvement:</strong> We store classification decisions to learn and improve accuracy over time</li>
+          <li><strong>User Interface:</strong> We display summaries and classifications in the web console</li>
+        </ul>
+
+        <h3>AI Processing</h3>
+        <p>
+          Email content is sent to our AI provider (OpenRouter API) for classification purposes. The AI analyzes
+          the email text to determine the appropriate category and action. Email content is processed in real-time
+          and is not permanently stored by the AI provider.
+        </p>
+
+        <h3>What We DO NOT Do</h3>
+        <ul>
+          <li>❌ Share your emails with third parties for marketing purposes</li>
+          <li>❌ Sell your data to anyone</li>
+          <li>❌ Use your emails for advertising</li>
+          <li>❌ Read emails outside the scope of classification</li>
+          <li>❌ Access emails without your explicit authorization</li>
+        </ul>
+
+        <h2>Data Storage and Security</h2>
+
+        <h3>What We Store</h3>
+        <ul>
+          <li><strong>Classification Results:</strong> Decisions about which label to apply and why (stored in our Supabase database)</li>
+          <li><strong>Message Summaries:</strong> AI-generated summaries for your reference</li>
+          <li><strong>OAuth Tokens:</strong> Encrypted access tokens to maintain authorized access</li>
+          <li><strong>Custom Criteria:</strong> Your classification rules and preferences</li>
+        </ul>
+
+        <h3>What We DO NOT Store</h3>
+        <ul>
+          <li>❌ Full email message bodies (processed in memory only)</li>
+          <li>❌ Email attachments</li>
+          <li>❌ Contact lists</li>
+          <li>❌ Unprocessed email content</li>
+        </ul>
+
+        <h3>Security Measures</h3>
+        <ul>
+          <li>All data transmitted using HTTPS/TLS encryption</li>
+          <li>OAuth tokens encrypted at rest in the database</li>
+          <li>Supabase database with row-level security</li>
+          <li>Access logs maintained for security monitoring</li>
+          <li>Regular security updates and patches</li>
+          <li>No storage of passwords (OAuth-only authentication)</li>
+        </ul>
+
+        <h2>Data Retention</h2>
+        <ul>
+          <li><strong>Classification Decisions:</strong> Kept until you delete them manually or revoke access</li>
+          <li><strong>Email Content:</strong> Not stored permanently; only processed temporarily in memory</li>
+          <li><strong>OAuth Tokens:</strong> Stored until you revoke access or delete your account</li>
+          <li><strong>Account Data:</strong> Deleted within 30 days of access revocation</li>
+        </ul>
+
+        <h2>Third-Party Services</h2>
+        <p>We use the following third-party services:</p>
+
+        <h3>Google Gmail API</h3>
+        <p>
+          Used to access your Gmail messages. Subject to <a href="https://policies.google.com/privacy" target="_blank">Google's Privacy Policy</a>.
+        </p>
+
+        <h3>OpenRouter API</h3>
+        <p>
+          AI service used to classify email content. Email text is sent to OpenRouter for analysis.
+          Processed data is not stored permanently by OpenRouter.
+        </p>
+
+        <h3>Supabase</h3>
+        <p>
+          Database service used to store classification results and preferences. Subject to
+          <a href="https://supabase.com/privacy" target="_blank">Supabase Privacy Policy</a>.
+        </p>
+
+        <h3>Google Cloud Platform</h3>
+        <p>
+          Hosting infrastructure for the application. Subject to
+          <a href="https://cloud.google.com/terms/cloud-privacy-notice" target="_blank">GCP Privacy Notice</a>.
+        </p>
+
+        <h2>Your Rights and Choices</h2>
+
+        <h3>Access and Control</h3>
+        <ul>
+          <li><strong>Revoke Access:</strong> Visit <a href="https://myaccount.google.com/permissions" target="_blank">Google Account Permissions</a> and remove "Inboximp Email Triage"</li>
+          <li><strong>View Classifications:</strong> Access all classification decisions via the web console</li>
+          <li><strong>Delete Data:</strong> Contact us to request complete data deletion</li>
+          <li><strong>Export Data:</strong> Request a copy of your classification data</li>
+          <li><strong>Modify Preferences:</strong> Update classification criteria at any time</li>
+        </ul>
+
+        <h3>Data Deletion</h3>
+        <p>
+          To delete all your data:
+        </p>
+        <ol>
+          <li>Revoke access at <a href="https://myaccount.google.com/permissions" target="_blank">Google Account Permissions</a></li>
+          <li>Email us at <a href="mailto:support@inboximp.com">support@inboximp.com</a> to request data deletion</li>
+          <li>We will delete all stored data within 30 days</li>
+        </ol>
+
+        <h2>Children's Privacy</h2>
+        <p>
+          Our Service is not directed to individuals under the age of 13. We do not knowingly collect
+          personal information from children under 13. If you are a parent or guardian and believe your
+          child has provided us with personal information, please contact us.
+        </p>
+
+        <h2>International Data Transfers</h2>
+        <p>
+          Your data may be transferred to and processed in countries other than your country of residence.
+          We ensure appropriate safeguards are in place for such transfers in compliance with applicable
+          data protection laws.
+        </p>
+
+        <h2>Changes to This Privacy Policy</h2>
+        <p>
+          We may update this Privacy Policy from time to time. We will notify you of significant changes by:
+        </p>
+        <ul>
+          <li>Updating the "Last Updated" date at the top of this policy</li>
+          <li>Sending an email notification to your Gmail address (for material changes)</li>
+          <li>Displaying a notice in the application</li>
+        </ul>
+        <p>
+          Continued use of the Service after changes constitutes acceptance of the updated Privacy Policy.
+        </p>
+
+        <h2>Contact Us</h2>
+        <p>
+          If you have questions, concerns, or requests regarding this Privacy Policy or our data practices:
+        </p>
+        <ul>
+          <li><strong>Email:</strong> <a href="mailto:support@inboximp.com">support@inboximp.com</a></li>
+          <li><strong>Privacy Requests:</strong> <a href="mailto:privacy@inboximp.com">privacy@inboximp.com</a></li>
+        </ul>
+
+        <h2>Google API Services User Data Policy</h2>
+        <p>
+          Inboximp Email Triage's use and transfer of information received from Google APIs adheres to
+          <a href="https://developers.google.com/terms/api-services-user-data-policy" target="_blank">Google API Services User Data Policy</a>,
+          including the Limited Use requirements.
+        </p>
+
+        <h2>Legal Basis for Processing (GDPR)</h2>
+        <p>
+          If you are in the European Economic Area (EEA), our legal basis for processing your personal data is:
+        </p>
+        <ul>
+          <li><strong>Consent:</strong> You have given explicit consent by authorizing our app via Google OAuth</li>
+          <li><strong>Contract:</strong> Processing is necessary to provide the email organization service</li>
+          <li><strong>Legitimate Interest:</strong> To improve and maintain our services</li>
+        </ul>
+
+        <h2>California Privacy Rights (CCPA)</h2>
+        <p>
+          California residents have specific rights regarding their personal information:
+        </p>
+        <ul>
+          <li>Right to know what personal information is collected</li>
+          <li>Right to know if personal information is sold or disclosed</li>
+          <li>Right to request deletion of personal information</li>
+          <li>Right to opt-out of the sale of personal information (we do not sell data)</li>
+          <li>Right to non-discrimination for exercising CCPA rights</li>
+        </ul>
+        <p>
+          To exercise these rights, contact us at <a href="mailto:privacy@inboximp.com">privacy@inboximp.com</a>.
+        </p>
+      </div>
+
+      <div class="footer">
+        <a href="/">Home</a>
+        <a href="/static/terms.html">Terms of Service</a>
+        <a href="mailto:support@inboximp.com">Contact</a>
+      </div>
+    </div>
+  </body>
+</html>
