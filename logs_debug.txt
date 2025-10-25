@@ -1,0 +1,61 @@
+Updated property [core/project].
+Latest revision: email-triage-00009-kj8
+--- Revision describe ---
+[1m[31;1mX[39;0m[1m Revision email-triage-00009-kj8 in region us-central1[m
+ 
+Container email-triage-1
+  Image:             gcr.io/inboximp-email-triage/email-triage@sha256:f8e5f0be5403f56b985178f4afd5b6e8e97fc0874431320c47be3026b03842e1
+  Port:              8080
+  Memory:            512Mi
+  CPU:               1000m
+  Env vars:
+    CLASSIFICATION_PROMPT_PATH /app/classification_prompt.txt
+    EMAIL_TRIAGE_LOG_LEVEL DEBUG
+    GMAIL_CLIENT_SECRET_PATH /secrets/gmail-client-secret.json
+    PYTHONPATH       /app
+  Secrets:
+    /app             gmail-client-secret-web:latest
+    /secrets         gmail-client-secret-web:latest
+    GOOGLE_OAUTH_CLIENT_ID google-oauth-client-id:latest
+    OPENROUTER_API_KEY openrouter-api-key:latest
+    SUPABASE_SERVICE_ROLE_KEY supabase-service-role-key:latest
+    SUPABASE_URL     supabase-url:latest
+    TELEGRAM_BOT_TOKEN telegram-bot-token:latest
+    TELEGRAM_CHAT_ID telegram-chat-id:latest
+  Startup Probe:
+    TCP every 240s
+    Port:            8080
+    Initial delay:   0s
+    Timeout:         240s
+    Failure threshold: 1
+    Type:            Default
+Service account:     email-triage-runner@inboximp-email-triage.iam.gserviceaccount.com
+Concurrency:         80
+Max instances:       20
+Timeout:             300s
+[31;1mX The user-provided container failed to start and listen on the port defined provided by the
+PORT=8080 environment variable within the allocated timeout. This can happen when the container port
+is misconfigured or if the timeout is too short. The health check timeout can be extended. Logs for
+this revision might contain more information.  Logs URL:
+https://console.cloud.google.com/logs/viewer?project=inboximp-email-
+triage&resource=cloud_run_revision/service_name/email-triage/revision_name/email-triage-00009-
+kj8&advancedFilter=resource.type%3D%22cloud_run_revision%22%0Aresource.labels.service_name%3D%22emai
+l-triage%22%0Aresource.labels.revision_name%3D%22email-triage-00009-kj8%22  For more troubleshooting
+guidance, see https://cloud.google.com/run/docs/troubleshooting#container-failed-to-start[39;0m
+--- Recent service logs (200) ---
+2025-10-24 18:29:25 ERROR:    Error loading ASGI app. Could not import module "app".
+2025-10-24 18:55:23 ERROR:    Error loading ASGI app. Could not import module "app".
+2025-10-24 19:01:16 ERROR:    Error loading ASGI app. Could not import module "app".
+2025-10-24 19:02:17 ERROR:    Error loading ASGI app. Could not import module "app".
+2025-10-24 19:08:02 ERROR:    Error loading ASGI app. Could not import module "app".
+2025-10-24 19:14:57 ERROR:    Error loading ASGI app. Could not import module "app".
+2025-10-24 19:20:45 ERROR:    Error loading ASGI app. Could not import module "app".
+2025-10-24 19:25:14 ERROR:    Error loading ASGI app. Could not import module "app".
+2025-10-24 19:33:28 ERROR:    Error loading ASGI app. Could not import module "app".
+--- Revision-specific logs (200) ---
+null
+Default STARTUP TCP probe failed 1 time consecutively for container "email-triage-1" on port 8080. The instance was not started.
+Connection failed with status CANCELLED.
+Container called exit(1).
+ERROR:    Error loading ASGI app. Could not import module "app".
+Starting new instance. Reason: DEPLOYMENT_ROLLOUT - Instance started due to traffic shifting between revisions due to deployment, traffic split adjustment, or deployment health check.

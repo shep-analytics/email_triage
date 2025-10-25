@@ -1,0 +1,72 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Secure wiring (no public access):
+# - Grant Cloud Run invoker to a service account
+# - Configure Pub/Sub push with OIDC auth from that service account
+# - Call app endpoints using an Identity Token
+
+PROJECT_ID=inboximp-email-triage
+REGION=us-central1
+SERVICE=email-triage
+TOPIC="projects/${PROJECT_ID}/topics/email-triage"
+SUBSCRIPTION=email-triage-push
+RUNTIME_SA=email-triage-runner@${PROJECT_ID}.iam.gserviceaccount.com
+
+gcloud config set project "${PROJECT_ID}"
+
+# Resolve current Cloud Run URL
+RUN_URL=$(gcloud run services describe "${SERVICE}" \
+  --region "${REGION}" \
+  --project "${PROJECT_ID}" \
+  --format='value(status.url)')
+echo "RUN_URL=${RUN_URL}"
+if [[ -z "${RUN_URL}" ]]; then
+  echo "Failed to resolve Cloud Run URL; ensure the service is deployed." >&2
+  exit 1
+fi
+
+# 1) Allow the chosen service account to invoke the service (service-level IAM)
+gcloud run services add-iam-policy-binding "${SERVICE}" \
+  --region "${REGION}" \
+  --member="serviceAccount:${RUNTIME_SA}" \
+  --role="roles/run.invoker" \
+  --project "${PROJECT_ID}"
+
+# 2) Point Pub/Sub to the Cloud Run URL and use OIDC auth as that service account
+if gcloud pubsub subscriptions describe "${SUBSCRIPTION}" --project "${PROJECT_ID}" >/dev/null 2>&1; then
+  gcloud pubsub subscriptions update "${SUBSCRIPTION}" \
+    --push-endpoint="${RUN_URL}/gmail/push" \
+    --push-auth-service-account="${RUNTIME_SA}" \
+    --project "${PROJECT_ID}"
+else
+  gcloud pubsub subscriptions create "${SUBSCRIPTION}" \
+    --topic "${TOPIC}" \
+    --push-endpoint="${RUN_URL}/gmail/push" \
+    --push-auth-service-account="${RUNTIME_SA}" \
+    --project "${PROJECT_ID}"
+fi
+
+# 3) Ensure Gmail publisher can publish to your topic (required by Gmail watches)
+gcloud pubsub topics add-iam-policy-binding "${TOPIC}" \
+  --member="serviceAccount:gmail-api-push@system.gserviceaccount.com" \
+  --role="roles/pubsub.publisher" \
+  --project "${PROJECT_ID}" || true
+
+# 4) Invoke app endpoints using an Identity Token via SA impersonation (portable)
+# Grant your user the ability to mint tokens for the runtime SA, if not already granted.
+USER_EMAIL=$(gcloud config get-value account 2>/dev/null || true)
+gcloud iam service-accounts add-iam-policy-binding "${RUNTIME_SA}" \
+  --member="user:${USER_EMAIL}" \
+  --role="roles/iam.serviceAccountTokenCreator" \
+  --project "${PROJECT_ID}" || true
+
+ID_TOKEN=$(gcloud auth print-identity-token \
+  --impersonate-service-account="${RUNTIME_SA}" \
+  --audiences="${RUN_URL}")
+
+curl -fsS -H "Authorization: Bearer ${ID_TOKEN}" -X POST "${RUN_URL}/gmail/watch" || true
+curl -fsS -H "Authorization: Bearer ${ID_TOKEN}" "${RUN_URL}/healthz" || \
+curl -fsS -H "Authorization: Bearer ${ID_TOKEN}" "${RUN_URL}/health" || true
+
+echo "Secure wiring complete. Pub/Sub pushes use OIDC; Cloud Run remains private."

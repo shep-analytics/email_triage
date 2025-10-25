@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+PROJECT_ID=inboximp-email-triage
+REGION=us-central1
+SERVICE=email-triage
+
+gcloud config set project "${PROJECT_ID}"
+
+REV=$(gcloud run services describe "${SERVICE}" --region "${REGION}" --project "${PROJECT_ID}" --format='value(status.latestCreatedRevisionName)')
+echo "Latest revision: ${REV}"
+
+echo "--- Revision describe ---"
+gcloud run revisions describe "${REV}" --region "${REGION}" --project "${PROJECT_ID}" || true
+
+echo "--- Recent service logs (200) ---"
+gcloud run services logs read "${SERVICE}" --region "${REGION}" --project "${PROJECT_ID}" --limit 200 || true
+
+echo "--- Revision-specific logs (200) ---"
+gcloud logging read \
+  'resource.type="cloud_run_revision" AND resource.labels.service_name="'"${SERVICE}"'" AND resource.labels.revision_name="'"${REV}"'"' \
+  --project "${PROJECT_ID}" \
+  --limit 200 \
+  --format=json | jq -r '.[].textPayload' || true
+

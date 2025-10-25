@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+PROJECT_ID=inboximp-email-triage
+REGION=us-central1
+SERVICE=email-triage
+IMAGE=gcr.io/${PROJECT_ID}/${SERVICE}
+
+gcloud config set project "${PROJECT_ID}"
+
+# Rebuild image to pick up Dockerfile fixes (PYTHONPATH + python -m uvicorn)
+gcloud builds submit --tag "${IMAGE}" --project "${PROJECT_ID}"
+
+# Redeploy with explicit env for module path and prompt file
+gcloud run deploy "${SERVICE}" \
+  --image "${IMAGE}" \
+  --region "${REGION}" \
+  --platform managed \
+  --update-env-vars="PYTHONPATH=/app,CLASSIFICATION_PROMPT_PATH=/app/classification_prompt.txt,EMAIL_TRIAGE_LOG_LEVEL=DEBUG" \
+  --update-secrets="/secrets/gmail-client-secret.json=gmail-client-secret-web:latest" \
+  --remove-secrets="/app/client_secret_from_secret.json,/app" \
+  --project "${PROJECT_ID}"
+
+# Print URL and recent logs for quick verification
+RUN_URL=$(gcloud run services describe "${SERVICE}" --region "${REGION}" --project "${PROJECT_ID}" --format='value(status.url)')
+echo "RUN_URL=${RUN_URL}"
+gcloud run services logs read "${SERVICE}" --region "${REGION}" --project "${PROJECT_ID}" --limit 200 || true
+
+# Show secret mounts after update for confirmation
+echo "--- Secret mounts after deploy ---"
+gcloud run revisions describe $(gcloud run services describe "${SERVICE}" --region "${REGION}" --project "${PROJECT_ID}" --format='value(status.latestCreatedRevisionName)') \
+  --region "${REGION}" --project "${PROJECT_ID}" | sed -n '/Secrets:/,$p' || true

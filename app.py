@@ -210,17 +210,42 @@ def gmail_service_factory(email: str, *, scopes=None):
     allow_flow = _true(os.getenv("GMAIL_ALLOW_OAUTH_FLOW"))
     # Prefer Supabase-stored tokens when available
     oauth_json = None
+    token_source = "none"
     try:
         oauth_json = state_store.get_gmail_token(email=email)
-    except Exception:
+        if oauth_json:
+            token_source = "supabase"
+            # DIAGNOSTIC: Parse and log scopes from Supabase token
+            try:
+                import json as json_lib
+                token_data = json_lib.loads(oauth_json)
+                token_scopes = token_data.get("scopes", [])
+                logger.info(
+                    "DIAGNOSTIC: Loading token for %s from SUPABASE with %d scopes: %s",
+                    email,
+                    len(token_scopes),
+                    [s.replace("https://www.googleapis.com/auth/", "") for s in token_scopes],
+                )
+            except Exception as e:
+                logger.warning("DIAGNOSTIC: Could not parse Supabase token scopes: %s", e)
+        else:
+            token_source = "filesystem"
+            logger.info("DIAGNOSTIC: No Supabase token for %s, will fall back to filesystem: %s", email, token_file)
+    except Exception as e:
         oauth_json = None
+        token_source = "filesystem"
+        logger.warning("DIAGNOSTIC: Supabase token retrieval failed for %s: %s - falling back to filesystem", email, e)
 
     def _persist_token(updated_json: str) -> None:
         try:
             state_store.upsert_gmail_token(email=email, token_json=updated_json)
-        except Exception:
+            logger.info("DIAGNOSTIC: Token updated and persisted to Supabase for %s", email)
+        except Exception as e:
             # Best-effort; ignore persistence failures
+            logger.warning("DIAGNOSTIC: Failed to persist token to Supabase for %s: %s", email, e)
             pass
+
+    logger.info("DIAGNOSTIC: Building Gmail service for %s using token source: %s, scopes: %s", email, token_source, scopes)
 
     return build_gmail_service(
         oauth_client_secret=oauth_client_secret,
@@ -433,6 +458,23 @@ def _clean_llm_text_output(value: str) -> str:
 def _load_message_payload(service, mailbox: str, gmail_id: str) -> Tuple[Dict[str, Any], Dict[str, str], str, str, bool, str]:
     metadata_only = False
     permission_warning = ""
+
+    # DIAGNOSTIC: Log which scopes the service actually has
+    try:
+        credentials = getattr(getattr(service, "_http", None), "credentials", None)
+        if credentials:
+            scopes = sorted(set(getattr(credentials, "scopes", []) or []))
+            logger.info(
+                "DIAGNOSTIC: Fetching message %s for %s with scopes: %s (valid=%s, expired=%s)",
+                gmail_id,
+                mailbox,
+                scopes,
+                getattr(credentials, "valid", "unknown"),
+                getattr(credentials, "expired", "unknown"),
+            )
+    except Exception as e:
+        logger.debug("Unable to introspect credentials before fetch: %s", e)
+
     try:
         message = (
             service.users()
@@ -449,6 +491,16 @@ def _load_message_payload(service, mailbox: str, gmail_id: str) -> Tuple[Dict[st
             detail = str(he)
         msg = detail or str(he)
         lowered = msg.lower()
+
+        # DIAGNOSTIC: Log the full error details
+        logger.error(
+            "DIAGNOSTIC: Gmail API error when fetching %s for %s - Status=%s, Error=%s",
+            gmail_id,
+            mailbox,
+            status,
+            msg[:500],  # First 500 chars of error
+        )
+
         if status == 403 and "metadata scope" in lowered:
             message = (
                 service.users()

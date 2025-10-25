@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Post-deploy wiring: set Pub/Sub push endpoint to the new Cloud Run URL
+# and refresh Gmail watches. Copy/paste the whole file or run:  bash commands_post_deploy
+
+PROJECT_ID=inboximp-email-triage
+REGION=us-central1
+SERVICE=email-triage
+TOPIC="projects/${PROJECT_ID}/topics/email-triage"
+SUBSCRIPTION=email-triage-push
+
+gcloud config set project "${PROJECT_ID}"
+
+RUN_URL=$(gcloud run services describe "${SERVICE}" \
+  --region "${REGION}" \
+  --project "${PROJECT_ID}" \
+  --format='value(status.url)')
+echo "RUN_URL=${RUN_URL}"
+
+if [[ -z "${RUN_URL}" ]]; then
+  echo "Failed to resolve Cloud Run URL; ensure the service is deployed." >&2
+  exit 1
+fi
+
+# Update or create the push subscription
+if gcloud pubsub subscriptions describe "${SUBSCRIPTION}" --project "${PROJECT_ID}" >/dev/null 2>&1; then
+  gcloud pubsub subscriptions update "${SUBSCRIPTION}" \
+    --push-endpoint="${RUN_URL}/gmail/push" \
+    --project "${PROJECT_ID}"
+else
+  gcloud pubsub subscriptions create "${SUBSCRIPTION}" \
+    --topic "${TOPIC}" \
+    --push-endpoint="${RUN_URL}/gmail/push" \
+    --project "${PROJECT_ID}"
+fi
+
+# Refresh Gmail watches for all configured accounts
+curl -fsS -X POST "${RUN_URL}/gmail/watch" || true
+
+# Health check
+curl -fsS "${RUN_URL}/healthz" || curl -fsS "${RUN_URL}/health" || true
+

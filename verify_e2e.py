@@ -421,7 +421,7 @@ def gmail_insert_message(email: str, subject: str, body: str) -> Optional[str]:
     """Attempt to insert a message into INBOX. Returns message id or None."""
     try:
         service = build_gmail_service(
-            oauth_client_secret=str(Path(getattr(config, "GMAIL_CLIENT_SECRET_PATH", "client_secret_desktop.json")).resolve()),
+            oauth_client_secret=str(Path(getattr(config, "GMAIL_CLIENT_SECRET_PATH", "json_keys/client_secret.json")).resolve()),
             oauth_token_file=str(Path(getattr(config, "GMAIL_OAUTH_TOKEN_DIR", ".gmail_tokens")).resolve() / f"token_{email.replace('@','_at_').replace('.','_')}.json"),
         )
     except Exception as exc:

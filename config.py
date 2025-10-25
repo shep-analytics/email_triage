@@ -26,7 +26,7 @@ GMAIL_CLIENT_SECRET_PATH = "json_keys/client_secret.json"
 GMAIL_OAUTH_TOKEN_DIR = ".gmail_tokens"
 
 # Pub/Sub topic used for Gmail push notifications.
-GMAIL_TOPIC_NAME = "projects/email-assistant-475201/topics/email-triage"
+GMAIL_TOPIC_NAME = "projects/inboximp-email-triage/topics/email-triage"
 
 # Optional: override the delegated user when using a service account.
 GMAIL_DELEGATED_USER = None

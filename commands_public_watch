@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Make Cloud Run service public and finalize Gmail push wiring
+# Copy/paste or run:  bash commands_public_watch
+
+PROJECT_ID=inboximp-email-triage
+REGION=us-central1
+SERVICE=email-triage
+TOPIC="projects/${PROJECT_ID}/topics/email-triage"
+SUBSCRIPTION=email-triage-push
+
+gcloud config set project "${PROJECT_ID}"
+
+# 1) Allow unauthenticated invocations (public UI + webhooks)
+gcloud run services add-iam-policy-binding "${SERVICE}" \
+  --region "${REGION}" \
+  --member="allUsers" \
+  --role="roles/run.invoker" \
+  --project "${PROJECT_ID}"
+
+# 2) Ensure Gmail push publisher can publish to your Pub/Sub topic
+gcloud pubsub topics add-iam-policy-binding "${TOPIC}" \
+  --member="serviceAccount:gmail-api-push@system.gserviceaccount.com" \
+  --role="roles/pubsub.publisher" \
+  --project "${PROJECT_ID}"
+
+# 3) Update the subscription push endpoint to the current Cloud Run URL
+RUN_URL=$(gcloud run services describe "${SERVICE}" \
+  --region "${REGION}" \
+  --project "${PROJECT_ID}" \
+  --format='value(status.url)')
+echo "RUN_URL=${RUN_URL}"
+
+gcloud pubsub subscriptions update "${SUBSCRIPTION}" \
+  --push-endpoint="${RUN_URL}/gmail/push" \
+  --project "${PROJECT_ID}" || true
+
+# 4) Register/refresh Gmail watches (requires valid OAuth tokens for each mailbox)
+curl -fsS -X POST "${RUN_URL}/gmail/watch" || true
+
+# 5) Health check (now unauthenticated)
+curl -fsS "${RUN_URL}/healthz" || curl -fsS "${RUN_URL}/health" || true
+
+echo "If /gmail/watch returned an error, ensure mailbox OAuth tokens exist in Supabase or .gmail_tokens, or connect via the UI at: ${RUN_URL}/"
+

@@ -1,0 +1,58 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+PROJECT_ID=inboximp-email-triage
+REGION=us-central1
+SERVICE=email-triage
+IMAGE=gcr.io/${PROJECT_ID}/${SERVICE}
+RUNTIME_SA=email-triage-runner@${PROJECT_ID}.iam.gserviceaccount.com
+TOPIC=projects/${PROJECT_ID}/topics/email-triage
+SUBSCRIPTION=email-triage-push
+TIMEOUT_SECONDS=300
+MAKE_PUBLIC=0
+
+gcloud config set project "${PROJECT_ID}"
+
+gcloud services enable run.googleapis.com pubsub.googleapis.com secretmanager.googleapis.com cloudbuild.googleapis.com --project "${PROJECT_ID}"
+
+gcloud iam service-accounts describe "${RUNTIME_SA}" --project "${PROJECT_ID}" >/dev/null 2>&1 || \
+gcloud iam service-accounts create email-triage-runner --display-name "Email Triage Runtime" --project "${PROJECT_ID}"
+
+gcloud projects add-iam-policy-binding "${PROJECT_ID}" --member="serviceAccount:${RUNTIME_SA}" --role="roles/storage.objectViewer" --quiet
+
+for S in openrouter-api-key supabase-url supabase-service-role-key telegram-bot-token telegram-chat-id google-oauth-client-id gmail-client-secret-web; do \
+  gcloud secrets describe "$S" --project "${PROJECT_ID}" >/dev/null 2>&1 && \
+  gcloud secrets add-iam-policy-binding "$S" --member="serviceAccount:${RUNTIME_SA}" --role="roles/secretmanager.secretAccessor" --project "${PROJECT_ID}" || true; \
+done
+
+gcloud builds submit --tag "${IMAGE}" --project "${PROJECT_ID}"
+
+gcloud run deploy "${SERVICE}" \
+  --image "${IMAGE}" \
+  --region "${REGION}" \
+  --platform managed \
+  --service-account="${RUNTIME_SA}" \
+  --update-secrets="OPENROUTER_API_KEY=openrouter-api-key:latest,SUPABASE_URL=supabase-url:latest,SUPABASE_SERVICE_ROLE_KEY=supabase-service-role-key:latest,TELEGRAM_BOT_TOKEN=telegram-bot-token:latest,TELEGRAM_CHAT_ID=telegram-chat-id:latest,GOOGLE_OAUTH_CLIENT_ID=google-oauth-client-id:latest,/secrets/gmail-client-secret.json=gmail-client-secret-web:latest" \
+  --update-env-vars="GMAIL_CLIENT_SECRET_PATH=/secrets/gmail-client-secret.json" \
+  --timeout=${TIMEOUT_SECONDS} \
+  --no-allow-unauthenticated \
+  --quiet \
+  --project "${PROJECT_ID}" || true
+
+RUN_URL=$(gcloud run services describe "${SERVICE}" --region "${REGION}" --project "${PROJECT_ID}" --format='value(status.url)')
+if [[ -n "${RUN_URL}" ]]; then echo "${RUN_URL}"; fi
+if [[ -n "${RUN_URL}" ]]; then \
+  curl -fsS "${RUN_URL}/healthz" || curl -fsS "${RUN_URL}/health" || true; \
+  if gcloud pubsub subscriptions describe "${SUBSCRIPTION}" --project "${PROJECT_ID}" >/dev/null 2>&1; then \
+    gcloud pubsub subscriptions update "${SUBSCRIPTION}" --push-endpoint="${RUN_URL}/gmail/push" --project "${PROJECT_ID}"; \
+  else \
+    gcloud pubsub subscriptions create "${SUBSCRIPTION}" --topic "${TOPIC}" --push-endpoint="${RUN_URL}/gmail/push" --project "${PROJECT_ID}"; \
+  fi; \
+  curl -fsS -X POST "${RUN_URL}/gmail/watch" || true; \
+fi
+
+gcloud run services logs read "${SERVICE}" --region "${REGION}" --project "${PROJECT_ID}" --limit 200 || true
+
+if [[ "${MAKE_PUBLIC}" == "1" ]]; then \
+  gcloud run services add-iam-policy-binding "${SERVICE}" --region "${REGION}" --member="allUsers" --role="roles/run.invoker" --project "${PROJECT_ID}"; \
+fi

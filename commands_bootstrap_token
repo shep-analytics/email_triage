@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Bootstrap a Gmail OAuth token for the mailbox using a Desktop OAuth client.
+# Copy/paste or run:  bash commands_bootstrap_token
+
+MAILBOX_EMAIL=${MAILBOX_EMAIL:-alexsheppert@gmail.com}
+CLIENT_SECRET=${CLIENT_SECRET:-json_keys/client_secret_desktop.json}
+
+if [[ ! -f "${CLIENT_SECRET}" ]]; then
+  echo "Missing Desktop OAuth client JSON at ${CLIENT_SECRET}." >&2
+  echo "Create an OAuth client of type 'Desktop app' in Google Cloud Console and download the JSON to this path." >&2
+  echo "Console: APIs & Services -> Credentials -> Create Credentials -> OAuth client ID -> Desktop app" >&2
+  exit 1
+fi
+
+echo "Bootstrapping Gmail token for ${MAILBOX_EMAIL} using local-server flow with Desktop client..."
+echo "A browser window will open for consent; if it doesn't, copy the URL printed."
+python3 bootstrap_gmail_token.py "${MAILBOX_EMAIL}" --mode local-server --client-secret "${CLIENT_SECRET}"
+
+echo "Done. If Supabase is configured, the token was upserted."
+echo "Next: run 'bash commands_secure_wiring' or 'bash commands_watch_only' to start the Gmail watch."

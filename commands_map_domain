@@ -1,0 +1,50 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Map a custom domain to your Cloud Run service and update Pub/Sub to use it.
+# Copy/paste or run:  bash commands_map_domain
+
+PROJECT_ID=inboximp-email-triage
+REGION=us-central1
+SERVICE=email-triage
+DOMAIN=inboximp.com
+ALT_DOMAIN=www.inboximp.com
+SUBSCRIPTION=email-triage-push
+RUNTIME_SA=email-triage-runner@${PROJECT_ID}.iam.gserviceaccount.com
+
+gcloud config set project "${PROJECT_ID}"
+
+echo "Creating domain mappings (this is idempotent)…"
+gcloud beta run domain-mappings create --service "${SERVICE}" --region "${REGION}" --domain "${DOMAIN}" --force-override || true
+gcloud beta run domain-mappings create --service "${SERVICE}" --region "${REGION}" --domain "${ALT_DOMAIN}" --force-override || true
+
+echo "\nDNS records to add in Namecheap (A/AAAA for apex, CNAME for www):"
+echo "--- ${DOMAIN} ---"
+gcloud beta run domain-mappings describe --domain "${DOMAIN}" --region "${REGION}" --project "${PROJECT_ID}" --format='value(status.resourceRecords)'
+echo "--- ${ALT_DOMAIN} ---"
+gcloud beta run domain-mappings describe --domain "${ALT_DOMAIN}" --region "${REGION}" --project "${PROJECT_ID}" --format='value(status.resourceRecords)'
+
+echo "\nAfter DNS propagates, certificates will be provisioned automatically. You can check readiness with:"
+echo "  gcloud beta run domain-mappings describe --domain '${DOMAIN}' --region '${REGION}' --format='yaml(status)'"
+
+CUSTOM_URL="https://${DOMAIN}"
+
+echo "\nUpdating Pub/Sub push endpoint to ${CUSTOM_URL}/gmail/push with OIDC auth…"
+if gcloud pubsub subscriptions describe "${SUBSCRIPTION}" --project "${PROJECT_ID}" >/dev/null 2>&1; then
+  gcloud pubsub subscriptions update "${SUBSCRIPTION}" \
+    --push-endpoint="${CUSTOM_URL}/gmail/push" \
+    --push-auth-service-account="${RUNTIME_SA}" \
+    --project "${PROJECT_ID}"
+else
+  gcloud pubsub subscriptions create "${SUBSCRIPTION}" \
+    --topic "projects/${PROJECT_ID}/topics/email-triage" \
+    --push-endpoint="${CUSTOM_URL}/gmail/push" \
+    --push-auth-service-account="${RUNTIME_SA}" \
+    --project "${PROJECT_ID}"
+fi
+
+echo "\nReminder: In Google Cloud Console → APIs & Services → Credentials, edit your Web OAuth client to add:"
+echo "  Authorized redirect URIs: ${CUSTOM_URL}/oauth/callback and https://${ALT_DOMAIN}/oauth/callback"
+echo "  Authorized JavaScript origins: ${CUSTOM_URL} and https://${ALT_DOMAIN}"
+
+echo "Done. Add the DNS records in Namecheap, wait for propagation (usually <15 min), then visit ${CUSTOM_URL}/healthz."

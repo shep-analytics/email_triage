@@ -34,6 +34,7 @@ Configuration
   - `GMAIL_EXTRA_SCOPES`: Comma-separated list appended to default scopes.
   - `DISABLE_TELEGRAM=1`: Global kill-switch to disable all Telegram sends.
   - `OPENROUTER_MODEL`: Override the default LLM model (default is `openai/gpt-5`).
+  - `EMAIL_TRIAGE_LOG_DIR` / `EMAIL_TRIAGE_LOG_LEVEL`: Override the local log directory (default `logs/`) or log level (default `INFO`).
   - Note: UI reply requires Gmail scope `gmail.send`. Tokens minted before this change may need re‑consent; set `GMAIL_AUTO_REAUTH=1` and temporarily `GMAIL_ALLOW_OAUTH_FLOW=1` to refresh locally.
 
 **Hands-Off Deployment (Zero-Input)**
@@ -43,7 +44,7 @@ Configuration
   - Supabase: configured via `keys.py`.
   - LLM: configured via `keys.py`.
   - Gmail auth path (choose one):
-    - OAuth tokens per mailbox under `.gmail_tokens/` plus `json_keys/client_secret_desktop.json` (works for consumer Gmail), or
+    - OAuth tokens per mailbox under `.gmail_tokens/` plus `json_keys/client_secret.json` (Web OAuth client - works for consumer Gmail), or
     - Service Account with Domain‑Wide Delegation + delegated user email(s) (Workspace only).
   - Telegram: configured via `keys.py` (optional).
   - Web UI auth: `GOOGLE_OAUTH_CLIENT_ID` in `keys.py`; allowed emails in `config.py` (`ALLOWED_LOGIN_EMAILS`).
@@ -111,11 +112,13 @@ Local Development — Quickstart
 2) LLM: export `OPENROUTER_API_KEY=...` or create `keys.py` with `OPENROUTER_API_Key = "..."`.
 3) Telegram (optional but recommended): set `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` (or put in `keys.py`).
 4) Gmail OAuth token(s):
-   - Place a client secret JSON at repo root (e.g., `client_secret_desktop.json`).
+   - Place a Web OAuth client secret JSON in `json_keys/client_secret.json` (or create symlink at repo root).
    - For each mailbox: `python3 bootstrap_gmail_token.py you@example.com` → saves `.gmail_tokens/token_you_at_example_com.json`.
 5) Supabase: set `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` for persistence; otherwise fallback store is used.
 6) Web console auth: set `GOOGLE_OAUTH_CLIENT_ID` and `ALLOWED_LOGIN_EMAILS` (or list in `config.py`).
-7) Run locally: `uvicorn app:app --reload` and open `http://localhost:8000/`.
+7) Run locally: `python3 devserver.py` (listens on `http://localhost:8000/` by default and prints the log file path).
+
+Local runs create a fresh log file at `logs/email_triage_<timestamp>.log`. The active path is also exported as `EMAIL_TRIAGE_ACTIVE_LOG` for easy reference when troubleshooting.
 
 Operational Notes
 - Watches expire ~24h; call `/gmail/watch` periodically (Cloud Scheduler or cron). `/cron/refresh` is provided.
@@ -136,6 +139,7 @@ Deployment
 - Cloud Run: See `docs/cloud_run.md` or use `deploy_cloud_run.py` for scripted deploys; `ship_and_deploy.py` can git add/commit/push then deploy.
 - GitHub Actions: `.github/workflows/deploy.yml` builds with Cloud Build and deploys to Cloud Run on pushes to `main` (requires repo secrets `GCP_SA_KEY`, `GCP_PROJECT_ID`).
 - End-to-end validator: `verify_e2e.py` can build/deploy, wire Pub/Sub, register watches, inject a test message (when permitted), trigger processing, query Supabase, and send a digest.
+- Full push workflow: `docs/cloud_deploy_runbook.md`.
 
 Batch Cleanup & Feedback Loop
 - UI calls `POST /api/cleanup/run` to process the next batch (default 50). Processor classifies each message into one of:
@@ -183,16 +187,10 @@ What Future Agents Should Know
 - For tests and local validation, prefer using `verify_e2e.py` or dry runs. Avoid writing broad integration tests that call external APIs unless feature work requires it.
 - please update this file AGENTS.md after all calls if anything has changed. This file AGENTS.md should remain up to date, anything changed should be reflected in this file and this file should remain up to date.
 
-Commit/Push + Verify Policy
-- After every change you make to files in this repo, you must: (1) commit, (2) push, and (3) run end-to-end verification.
-- Steps to follow each time:
-  - Stage changes: `git add -A` (do not delete committed keys; committing keys in this repo is acceptable per project policy).
-  - Commit: `git commit -m "agent: <brief summary of change>"`.
-  - Push: `git push origin main`.
-- Verify: run `python3 verify_e2e.py --key-file json_keys/owner_google_service_account_key.json --region us-central1 --service email-triage --subscription email-triage-push --email <one_of_GMAIL_ACCOUNTS>`.
-- If verification fails due to transient issues, rerun once. If it still fails, surface the error, do not roll back, and add a note to the Updates section.
-- Always update this AGENTS.md if the workflow, commands, or assumptions change.
-  - Note on push protection: if GitHub blocks the push due to detected secrets (e.g., Google service-account JSON), do not include that file in the commit. Keep it locally under `json_keys/` and pass it via `--key-file` or configure via CI secrets. Never delete already-committed keys from history in this project.
+Cloud Deploy Policy
+- Local development on localhost is the default workflow; deploy only when explicitly needed.
+- When a Cloud Run deploy is required, follow `docs/cloud_deploy_runbook.md` for stage/commit/push/verify steps.
+- Document any deviations or new deploy requirements in this file under Updates.
 
 Common Pitfalls
 - 403 insufficientPermissions from Gmail: scope mismatch with stored token; set `GMAIL_AUTO_REAUTH=1` and revisit consent locally with `GMAIL_ALLOW_OAUTH_FLOW=1`.
@@ -204,12 +202,17 @@ Runbooks — Handy Commands
 - Bootstrap OAuth token: `python3 bootstrap_gmail_token.py you@example.com`
 - Headless/terminal OAuth: set `GMAIL_OAUTH_FLOW=console` or run `python3 bootstrap_gmail_token.py you@example.com --mode console` (prints a URL and device code). The script also upserts the token to Supabase if `keys.py` contains Supabase creds and the `gmail_tokens` table exists.
 - Web OAuth (for any user): ensure a Google OAuth Client of type "Web application" is at `GMAIL_CLIENT_SECRET_PATH` (must contain a top‑level `web` key). Authorized redirect URI must include `<RUN_URL>/oauth/callback` and `http://localhost:8000/oauth/callback` for local. After GIS login, the UI now auto-opens the Connect popup (may be blocked; a "Connect Gmail" button is available).
-- Local API: `uvicorn app:app --reload`
+- Local API: `python3 devserver.py`
+- Show active log: `echo $EMAIL_TRIAGE_ACTIVE_LOG`
 - Start/refresh watches: `curl -X POST http://localhost:8000/gmail/watch`
 - Dry-run LLM: `curl -X POST http://localhost:8000/dry-run -H 'Content-Type: application/json' -d '{"sender":"x@y","to":"me@y","subject":"Hi","snippet":"..."}'`
 - One-shot cleanup: `python3 run_cleanup.py you@example.com --batch-size 50`
 
 Updates
+- 2025-10-24: Container startup fix. Dockerfile now sets `PYTHONPATH=/app` and runs `python -m uvicorn app:app` to avoid module resolution issues in Cloud Run. Added `commands_fix_startup` to rebuild + redeploy minimal changes when a revision fails with "Could not import module 'app'".
+- 2025-10-24: Added `commands` script. End-to-end Cloud Run deploy helper with idempotent steps (enable APIs, ensure runtime SA, bind Secret Manager roles, build, deploy, wire Pub/Sub, refresh watches). Intended for copy-paste or `bash commands` execution.
+- 2025-10-24: Gmail client secret env override improved. The server now honors both `GMAIL_CLIENT_SECRET_PATH` and the legacy alias `GMAIL_OAUTH_CLIENT_SECRET` for the OAuth client JSON path. This removes confusion when configuring Cloud Run with secrets mounted to a file path.
+- 2025-10-24: Local-first workflow. Added `devserver.py`, centralized logging (`logging_utils.py`) that writes per-run log files under `logs/`, and moved the Cloud deploy workflow to `docs/cloud_deploy_runbook.md`. AGENTS.md now documents local defaults and the `EMAIL_TRIAGE_ACTIVE_LOG` environment variable.
 - 2025-10-18: CI deploy via script. GitHub Actions now runs `verify_e2e.py` on every push to `main` using a service account key from repo secret `GCP_SA_KEY`. The previous workflow steps that directly invoked `gcloud builds submit` and `gcloud run deploy` were removed. The script performs build, deploy, Pub/Sub wiring, health checks, and scheduler setup. If you previously configured Cloud Build Triggers or Cloud Run continuous deployment, disable them to avoid duplicate build emails.
 - 2025-10-18: Agent workflow — enforce commit/push/verify after every change. Added explicit steps and command line to AGENTS.md.
 - 2025-10-18: Frontend error handling improved. The web console now normalizes FastAPI error payloads (including 422 validation arrays and nested objects) into readable messages, so users will no longer see "[object Object]" after pressing "Process next batch". No backend contract changes required.
@@ -239,11 +242,12 @@ Updates
 - 2025-10-20: Viewer metadata fallback. The `/api/messages/{id}` endpoint now catches metadata-scope-only tokens and returns the snippet with a warning instead of a hard 403. The UI surfaces the warning inline. Reply endpoint reuses the metadata fallback so users can still respond even if full bodies are blocked. Files touched: `app.py`, `static/app.js`, `static/styles.css`.
 - 2025-10-20: Viewer summaries + AI drafts. `/api/messages/{id}/summary` generates and caches short LLM summaries per message (stored in Supabase `messages.state='summary'` and cleared on delete). The UI shows the summary on load and falls back gracefully if generation fails. Added `/api/messages/{id}/respond` to produce a draft reply using recent Sent mail to match tone; viewer exposes a “Draft reply” button that pre-fills the reply box. HTML bodies now render inline instead of showing “(no text body)”. Files touched: `app.py`, `supabase_state.py`, `static/app.js`, `static/styles.css`.
 - 2025-10-24: Viewer metadata fallback improved. When a mailbox token only has `gmail.metadata`, Gmail omits both bodies and snippets on `messages.get`. The viewer now falls back to the snippet fetched during list-time when you press View, so you no longer see just “(no text body)”. Backend summary generation also falls back to the Subject line when both body and snippet are unavailable, ensuring an AI summary is still produced. Files touched: `static/app.js`, `app.py`. Deployed and verified via `verify_e2e.py --skip-deploy`.
- - 2025-10-24: Connect Gmail defaults + clearer warning. Default `GMAIL_CLIENT_SECRET_PATH` now points to `json_keys/client_secret.json` so the web “Connect Gmail” flow is enabled out of the box. The message viewer shows a clear warning when only `gmail.metadata` is granted and offers a one‑click “Connect Gmail” CTA to re‑consent. Added server‑side logging when metadata‑only fallback triggers. Files touched: `config.py`, `static/app.js`, `app.py`. Deployed and verified via `verify_e2e.py` with custom push endpoint.
- - 2025-10-24: Terminal OAuth + Supabase tokens. Added console/device-code OAuth flow support and optional Supabase token storage.
-   - New env: `GMAIL_OAUTH_FLOW=console|local_server` (default `local_server`).
-   - `bootstrap_gmail_token.py --mode console` supports headless terminals and upserts tokens to Supabase when configured.
-   - `gmail_watch.build_gmail_service` now accepts a token update callback so app/bootstrap can persist refreshed tokens to Supabase. App prefers Supabase tokens if table `gmail_tokens` exists.
+- 2025-10-24: Connect Gmail defaults + clearer warning. Default `GMAIL_CLIENT_SECRET_PATH` now points to `json_keys/client_secret.json` so the web “Connect Gmail” flow is enabled out of the box. The message viewer shows a clear warning when only `gmail.metadata` is granted and offers a one‑click “Connect Gmail” CTA to re‑consent. Added server‑side logging when metadata‑only fallback triggers. Files touched: `config.py`, `static/app.js`, `app.py`. Deployed and verified via `verify_e2e.py` with custom push endpoint.
+- 2025-10-24: Local web OAuth allows `http://localhost` callbacks by auto-setting `OAUTHLIB_INSECURE_TRANSPORT` and `OAUTHLIB_RELAX_TOKEN_SCOPE` during the flow, and message viewer logs token scopes when Gmail falls back to metadata-only. Helps diagnose consent issues while running on http://localhost. File touched: `app.py`.
+- 2025-10-24: Terminal OAuth + Supabase tokens. Added console/device-code OAuth flow support and optional Supabase token storage.
+  - New env: `GMAIL_OAUTH_FLOW=console|local_server` (default `local_server`).
+  - `bootstrap_gmail_token.py --mode console` supports headless terminals and upserts tokens to Supabase when configured.
+  - `gmail_watch.build_gmail_service` now accepts a token update callback so app/bootstrap can persist refreshed tokens to Supabase. App prefers Supabase tokens if table `gmail_tokens` exists.
    - Schema to create in Supabase once:
      `create table if not exists gmail_tokens ( email text primary key, token_json jsonb not null, scopes text[] null, updated_at timestamptz not null default now() );`
 
